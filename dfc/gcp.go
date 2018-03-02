@@ -140,7 +140,7 @@ func (gcpimpl *gcpimpl) getobj(fqn string, bucket string, objname string) (md5ha
 
 	// FIXME: 'if' block to debug parallel-read
 	if true {
-		md5hash, size, errstr = gcpimpl.readParallel(gcpctx, objhdl)
+		md5hash, size, errstr = gcpimpl.readParallel(gcpctx, objhdl, attrs.Size)
 		if errstr != "" {
 			glog.Infof("Error: parallel-read (object %s, bucket %s): %s", objname, bucket, errstr)
 		} else if omd5 == md5hash {
@@ -218,64 +218,82 @@ func (gcpimpl *gcpimpl) deleteobj(bucket, objname string) (errstr string, errcod
 type bufIO struct {
 	offset int64
 	buf    []byte
-	read   int
+	read   int // FIXME: make it atomic
 }
 
-func (gcpimpl *gcpimpl) readParallel(gcpctx context.Context, objhdl *storage.ObjectHandle) (md5hash string, size int64, errstr string) {
-	// 1. declare
+func (gcpimpl *gcpimpl) readParallel(gcpctx context.Context,
+	objhdl *storage.ObjectHandle, osize int64) (md5hash string, size int64, errstr string) {
+	// declare
 	npar, buffers := 16, gcpimpl.t.buffers4k
 	bsize := buffers.fixedsize
+	assert(bsize == 4096)
 	rq := make(chan *bufIO, npar) // receive queue
 	cq := make(chan *bufIO, npar) // completion queue
 	eq := make(chan error, npar)  // error queue
-	free := make([]*bufIO, npar)  // free buffers
-	curroff, nextoff := int64(0), int64(0)
+	lenring := npar * 2
+	inflight := 0
+	ring := make([]*bufIO, lenring, lenring) // free buffers
+	woff, roff := int64(0), int64(0)
 	md5 := md5.New() // FIXME: debug only
 
-	// 2. start
-	for i := 0; i < npar; i++ {
-		free[i] = &bufIO{offset: nextoff, buf: buffers.alloc()}
-		nextoff += bsize
+	// start
+	for i := 0; i < lenring; i++ {
+		bio := &bufIO{offset: roff, buf: buffers.alloc()}
+		ring[i] = bio
 	}
 	for i := 0; i < npar; i++ {
-		go gcpimpl.readRange(gcpctx, objhdl, rq, cq, eq)
+		go gcpimpl.readRange(gcpctx, objhdl, rq, cq, eq, osize)
 	}
+	// initial batch
 	for i := 0; i < npar; i++ {
-		bio := free[i]
-		free[i] = nil
+		bio := ring[i]
+		bio.read = 0
 		rq <- bio
+		inflight++
+		roff += bsize
 	}
-	// 3. work
-	for {
+	// work
+loop:
+	for woff < osize {
 		select {
 		case bio := <-cq:
+			// receive
 			if bio.buf == nil {
-				goto cleanup
+				continue loop
 			}
-			assert(bio.read > 0)
-			glog.Infof("DEBUG: received offset %d, size %d", bio.offset, bio.read) // FIXME: remove
-			glog.Flush()
-			pos := int((bio.offset-curroff)/bsize) % len(free)
-			assert(free[pos] == nil)
-			free[pos] = bio
-			if bio.offset == curroff {
-				// utilize received buffers; replenish rq
-				for free[pos] != nil {
-					bio = free[pos]
-					curroff += int64(bio.read)
-					nextoff += int64(bio.read)
-					_, err := md5.Write(bio.buf[:bio.read])
-					assert(err == nil, err)
-					if bio.read < int(bsize) { // eof
-						goto cleanup
-					}
-					bio.read, bio.offset, free[pos] = 0, nextoff, nil
-					rq <- bio
-					pos++
-					if pos >= len(free) {
-						pos = 0
-					}
+			inflight--
+			// write
+			wpos := int(woff/bsize) % lenring
+			for {
+				wbio := ring[wpos]
+				if wbio.read == 0 {
+					break
 				}
+				n, err := md5.Write(wbio.buf[:wbio.read])
+				assert(err == nil, err)
+				assert(n == wbio.read)
+				woff += int64(n)
+				glog.Infof("woff=%-10d", woff)
+				if wbio.read < int(bsize) { // eof
+					goto cleanup
+				}
+				assert(n == int(bsize))
+				wbio.read = 0
+				wpos++
+				if wpos >= lenring {
+					wpos = 0
+				}
+			}
+			// replenish
+			for inflight < npar {
+				roff += bsize
+				glog.Infof("roff=%20d", roff)
+				rpos := int(roff/bsize) % lenring
+				rbio := ring[rpos]
+				rbio.offset = roff
+				rbio.read = 0
+				rq <- rbio
+				inflight++
 			}
 		case err := <-eq:
 			errstr = fmt.Sprintf("gcp rr: %v", err)
@@ -285,8 +303,8 @@ func (gcpimpl *gcpimpl) readParallel(gcpctx context.Context, objhdl *storage.Obj
 cleanup:
 	close(rq)
 	// free returned
-	for i := 0; i < len(free); i++ {
-		bio := free[i]
+	for i := 0; i < lenring; i++ {
+		bio := ring[i]
 		if bio != nil {
 			buffers.free(bio.buf)
 		}
@@ -301,13 +319,17 @@ cleanup:
 	if errstr != "" {
 		return
 	}
-	size = curroff
+	size = woff
+	if size != osize {
+		glog.Errorf("Unexpected: osize %d != size %d", osize, size)
+	}
 	hashInBytes := md5.Sum(nil)[:16]
 	md5hash = hex.EncodeToString(hashInBytes)
 	return
 }
 
-func (gcpimpl *gcpimpl) readRange(gcpctx context.Context, objhdl *storage.ObjectHandle, rq, cq chan *bufIO, eq chan error) {
+func (gcpimpl *gcpimpl) readRange(gcpctx context.Context, objhdl *storage.ObjectHandle,
+	rq, cq chan *bufIO, eq chan error, osize int64) {
 	for {
 		select {
 		case bio := <-rq:
@@ -315,7 +337,16 @@ func (gcpimpl *gcpimpl) readRange(gcpctx context.Context, objhdl *storage.Object
 				cq <- &bufIO{}
 				return
 			}
-			gcpreader, err := objhdl.NewRangeReader(gcpctx, bio.offset, int64(len(bio.buf)))
+			if bio.offset >= osize {
+				bio.read = 0
+				cq <- bio
+				return
+			}
+			toread := int64(len(bio.buf))
+			if toread > osize-bio.offset {
+				toread = osize - bio.offset
+			}
+			gcpreader, err := objhdl.NewRangeReader(gcpctx, bio.offset, toread)
 			if err != nil {
 				eq <- err
 				cq <- bio
