@@ -23,7 +23,11 @@ import (
 )
 
 const (
-	AWS_MULTI_PART_DELIMITER = "-"
+	awsPutDfcHashType = "x-amz-meta-dfc-hash-type"
+	awsPutDfcHashVal  = "x-amz-meta-dfc-hash-val"
+	awsGetDfcHashType = "X-Amz-Meta-Dfc-Hash-Type"
+	awsGetDfcHashVal  = "X-Amz-Meta-Dfc-Hash-Val"
+	awsMultipartDelim = "-"
 )
 
 //======
@@ -61,13 +65,13 @@ func awsErrorToHTTP(awsError error) int {
 //
 //======
 func (awsimpl *awsimpl) listbucket(bucket string, msg *GetMsg) (jsbytes []byte, errstr string, errcode int) {
-	glog.Infof("aws listbucket %s", bucket)
+	glog.Infof("aws: listbucket %s", bucket)
 	sess := createsession()
 	svc := s3.New(sess)
 
 	params := &s3.ListObjectsInput{Bucket: aws.String(bucket)}
 	if msg.GetPrefix != "" {
-		params.Prefix = &msg.GetPrefix
+		params.Prefix = aws.String(msg.GetPrefix)
 	}
 	resp, err := svc.ListObjects(params)
 	if err != nil {
@@ -76,8 +80,30 @@ func (awsimpl *awsimpl) listbucket(bucket string, msg *GetMsg) (jsbytes []byte, 
 		return
 	}
 
+	verParams := &s3.ListObjectVersionsInput{Bucket: aws.String(bucket)}
+	if msg.GetPrefix != "" {
+		verParams.Prefix = aws.String(msg.GetPrefix)
+	}
+
+	var versions map[string]*string
+	if strings.Contains(msg.GetProps, GetPropsVersion) {
+		verResp, err := svc.ListObjectVersions(verParams)
+		if err != nil {
+			errstr = err.Error()
+			errcode = awsErrorToHTTP(err)
+			return
+		}
+
+		versions := make(map[string]*string, initialBucketListSize)
+		for _, vers := range verResp.Versions {
+			if *(vers.IsLatest) && vers.VersionId != nil {
+				versions[*(vers.Key)] = vers.VersionId
+			}
+		}
+	}
+
 	// var msg GetMsg
-	var reslist = BucketList{Entries: make([]*BucketEntry, 0, 1000)}
+	var reslist = BucketList{Entries: make([]*BucketEntry, 0, initialBucketListSize)}
 	for _, key := range resp.Contents {
 		entry := &BucketEntry{}
 		entry.Name = *(key.Key)
@@ -99,6 +125,11 @@ func (awsimpl *awsimpl) listbucket(bucket string, msg *GetMsg) (jsbytes []byte, 
 			omd5, _ := strconv.Unquote(*key.ETag)
 			entry.Checksum = omd5
 		}
+		if strings.Contains(msg.GetProps, GetPropsVersion) {
+			if val, ok := versions[*(key.Key)]; ok {
+				entry.Version = *val
+			}
+		}
 		// TODO: other GetMsg props TBD
 		reslist.Entries = append(reslist.Entries, entry)
 	}
@@ -110,11 +141,11 @@ func (awsimpl *awsimpl) listbucket(bucket string, msg *GetMsg) (jsbytes []byte, 
 	return
 }
 
-func (awsimpl *awsimpl) getobj(fqn, bucket, objname string) (md5hash string, size int64, errstr string, errcode int) {
-	var omd5 string
+func (awsimpl *awsimpl) getobj(fqn, bucket, objname string) (nhobj cksumvalue, size int64, errstr string, errcode int) {
+	var v cksumvalue
 	sess := createsession()
-	s3Svc := s3.New(sess)
-	obj, err := s3Svc.GetObject(&s3.GetObjectInput{
+	svc := s3.New(sess)
+	obj, err := svc.GetObject(&s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(objname),
 	})
@@ -124,39 +155,48 @@ func (awsimpl *awsimpl) getobj(fqn, bucket, objname string) (md5hash string, siz
 		return
 	}
 	defer obj.Body.Close()
-
-	omd5, _ = strconv.Unquote(*obj.ETag)
-	// Check for MultiPart
-	if strings.Contains(omd5, AWS_MULTI_PART_DELIMITER) {
-		if glog.V(3) {
-			glog.Infof("MultiPart object (bucket %s key %s) download and validation not supported",
-				bucket, objname)
+	// object may not have dfc metadata
+	if htype, ok := obj.Metadata[awsGetDfcHashType]; ok {
+		if hval, ok := obj.Metadata[awsGetDfcHashVal]; ok {
+			v = newcksumvalue(*htype, *hval)
 		}
-		// Ignore ETag
-		omd5 = ""
 	}
-	if md5hash, size, errstr = awsimpl.t.receiveFileAndFinalize(fqn, objname, omd5, obj.Body); errstr != "" {
+	md5, _ := strconv.Unquote(*obj.ETag)
+	// FIXME: multipart
+	if strings.Contains(md5, awsMultipartDelim) {
+		if glog.V(3) {
+			glog.Infof("Multipart object %s (bucket %s) - not validating checksum", objname, bucket)
+		}
+		md5 = ""
+	}
+	if nhobj, size, errstr = awsimpl.t.receiveFileAndFinalize(fqn, objname, md5, v, obj.Body); errstr != "" {
 		return
 	}
-	stats := getstorstats()
-	stats.add("bytesloaded", size)
 	if glog.V(3) {
 		glog.Infof("aws: GET %s (bucket %s)", objname, bucket)
 	}
 	return
-
 }
 
-func (awsimpl *awsimpl) putobj(file *os.File, bucket, objname string) (errstr string, errcode int) {
+func (awsimpl *awsimpl) putobj(file *os.File, bucket, objname string, ohash cksumvalue) (errstr string, errcode int) {
+	var (
+		err         error
+		htype, hval string
+		md          map[string]*string
+	)
+	if ohash != nil {
+		htype, hval = ohash.get()
+		md = make(map[string]*string)
+		md[awsPutDfcHashType] = aws.String(htype)
+		md[awsPutDfcHashVal] = aws.String(hval)
+	}
 	sess := createsession()
 	uploader := s3manager.NewUploader(sess)
-	//
-	// FIXME: use uploader.UploadWithContext() for larger files
-	//
-	_, err := uploader.Upload(&s3manager.UploadInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(objname),
-		Body:   file,
+	_, err = uploader.Upload(&s3manager.UploadInput{
+		Bucket:   aws.String(bucket),
+		Key:      aws.String(objname),
+		Body:     file,
+		Metadata: md,
 	})
 	if err != nil {
 		errcode = awsErrorToHTTP(err)

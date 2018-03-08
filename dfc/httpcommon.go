@@ -28,6 +28,9 @@ const (
 	maxidleconns   = 20              // max num idle connections
 	requesttimeout = 5 * time.Second // http timeout
 )
+const (
+	initialBucketListSize = 512
+)
 
 //===========
 //
@@ -36,8 +39,8 @@ const (
 //===========
 type cloudif interface {
 	listbucket(bucket string, msg *GetMsg) (jsbytes []byte, errstr string, errcode int)
-	getobj(fqn, bucket, objname string) (hash string, size int64, errstr string, errcode int)
-	putobj(file *os.File, bucket, objname string) (errstr string, errcode int)
+	getobj(fqn, bucket, objname string) (nhobj cksumvalue, size int64, errstr string, errcode int)
+	putobj(file *os.File, bucket, objname string, ohobj cksumvalue) (errstr string, errcode int)
 	deleteobj(bucket, objname string) (errstr string, errcode int)
 }
 
@@ -154,11 +157,14 @@ func (r *httprunner) stop(err error) {
 
 // intra-cluster IPC, control plane; calls (via http) another target or a proxy
 // optionally, sends a json-encoded body to the callee
-func (r *httprunner) call(si *daemonInfo, url string, method string, injson []byte) (outjson []byte, err error, errstr string, status int) {
+func (r *httprunner) call(si *daemonInfo, url, method string, injson []byte,
+	timeout ...time.Duration) (outjson []byte, err error, errstr string, status int) {
 	var (
 		request  *http.Request
 		response *http.Response
 		sid      = "unknown"
+		timer    *time.Timer
+		cancelch chan struct{}
 	)
 	if si != nil {
 		sid = si.DaemonID
@@ -178,7 +184,20 @@ func (r *httprunner) call(si *daemonInfo, url string, method string, injson []by
 		errstr = fmt.Sprintf("Unexpected failure to create http request %s %s, err: %v", method, url, err)
 		return
 	}
+	if len(timeout) > 0 {
+		cancelch = make(chan struct{})
+		timer = time.AfterFunc(timeout[0], func() {
+			close(cancelch)
+			cancelch = nil
+		})
+		request.Cancel = cancelch
+	}
 	response, err = r.httpclient.Do(request)
+	// For a timer created with AfterFunc(d, f), if t.Stop returns false, then the timer
+	// has already expired and the function f has been started in its own goroutine (time/sleep.go)
+	if timer != nil && timer.Stop() && cancelch != nil {
+		close(cancelch)
+	}
 	if err != nil {
 		if response != nil && response.StatusCode > 0 {
 			errstr = fmt.Sprintf("Failed to http-call %s (%s %s): status %s, err %v", sid, method, url, response.Status, err)
@@ -307,12 +326,6 @@ func (h *httprunner) setconfig(name, value string) (errstr string) {
 		} else {
 			ctx.config.LRUConfig.HighWM, checkwm = v, true
 		}
-	case "no_xattrs":
-		if v, err := strconv.ParseBool(value); err != nil {
-			errstr = fmt.Sprintf("Failed to parse no_xattrs, err: %v", err)
-		} else {
-			ctx.config.NoXattrs = v
-		}
 	case "passthru":
 		if v, err := strconv.ParseBool(value); err != nil {
 			errstr = fmt.Sprintf("Failed to parse passthru (proxy-only), err: %v", err)
@@ -331,8 +344,14 @@ func (h *httprunner) setconfig(name, value string) (errstr string) {
 		} else {
 			ctx.config.CksumConfig.ValidateColdGet = v
 		}
+	case "checksum":
+		if value == ChecksumXXHash || value == ChecksumNone {
+			ctx.config.CksumConfig.Checksum = value
+		} else {
+			return fmt.Sprintf("Invalid %s type %s - expecting %s or %s", name, value, ChecksumXXHash, ChecksumNone)
+		}
 	default:
-		errstr = fmt.Sprintf("Cannot set config var %s - readonly or unsupported", name)
+		errstr = fmt.Sprintf("Cannot set config var %s - is readonly or unsupported", name)
 	}
 	if checkwm {
 		hwm, lwm := ctx.config.LRUConfig.HighWM, ctx.config.LRUConfig.LowWM

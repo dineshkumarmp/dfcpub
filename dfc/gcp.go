@@ -22,6 +22,11 @@ import (
 	"google.golang.org/api/iterator"
 )
 
+const (
+	gcpDfcHashType = "x-goog-meta-dfc-hash-type"
+	gcpDfcHashVal  = "x-goog-meta-dfc-hash-val"
+)
+
 //======
 //
 // implements cloudif
@@ -48,25 +53,37 @@ func gcpErrorToHTTP(gcpError error) int {
 	return http.StatusInternalServerError
 }
 
+func createclient() (*storage.Client, context.Context, string) {
+	if getProjID() == "" {
+		return nil, nil, "Failed to get ProjectID from GCP"
+	}
+	gcpctx := context.Background()
+	client, err := storage.NewClient(gcpctx)
+	if err != nil {
+		return nil, nil, fmt.Sprintf("Failed to create client, err: %v", err)
+	}
+	return client, gcpctx, ""
+}
+
 //======
 //
 // methods
 //
 //======
 func (gcpimpl *gcpimpl) listbucket(bucket string, msg *GetMsg) (jsbytes []byte, errstr string, errcode int) {
-	glog.Infof("gcp listbucket %s", bucket)
+	glog.Infof("gcp: listbucket %s", bucket)
 	client, gcpctx, errstr := createclient()
 	if errstr != "" {
 		return
 	}
+	var query *storage.Query
 
-	var query *storage.Query = nil
 	if msg.GetPrefix != "" {
 		query = &storage.Query{Prefix: msg.GetPrefix}
 	}
 	it := client.Bucket(bucket).Objects(gcpctx, query)
 
-	var reslist = BucketList{Entries: make([]*BucketEntry, 0, 1000)}
+	var reslist = BucketList{Entries: make([]*BucketEntry, 0, initialBucketListSize)}
 	for {
 		attrs, err := it.Next()
 		if err == iterator.Done {
@@ -86,6 +103,9 @@ func (gcpimpl *gcpimpl) listbucket(bucket string, msg *GetMsg) (jsbytes []byte, 
 		}
 		if strings.Contains(msg.GetProps, GetPropsCtime) {
 			t := attrs.Created
+			if !attrs.Updated.IsZero() {
+				t = attrs.Updated
+			}
 			switch msg.GetTimeFormat {
 			case "":
 				fallthrough
@@ -97,6 +117,9 @@ func (gcpimpl *gcpimpl) listbucket(bucket string, msg *GetMsg) (jsbytes []byte, 
 		}
 		if strings.Contains(msg.GetProps, GetPropsChecksum) {
 			entry.Checksum = hex.EncodeToString(attrs.MD5)
+		}
+		if strings.Contains(msg.GetProps, GetPropsVersion) {
+			entry.Version = fmt.Sprintf("%d", attrs.Generation)
 		}
 		// TODO: other GetMsg props TBD
 
@@ -110,21 +133,11 @@ func (gcpimpl *gcpimpl) listbucket(bucket string, msg *GetMsg) (jsbytes []byte, 
 	return
 }
 
-// Initialize and create storage client
-func createclient() (*storage.Client, context.Context, string) {
-	if getProjID() == "" {
-		return nil, nil, "Failed to get ProjectID from GCP"
-	}
-	gcpctx := context.Background()
-	client, err := storage.NewClient(gcpctx)
-	if err != nil {
-		return nil, nil, fmt.Sprintf("Failed to create client, err: %v", err)
-	}
-	return client, gcpctx, ""
-}
-
-// FIXME: revisit error processing
-func (gcpimpl *gcpimpl) getobj(fqn string, bucket string, objname string) (md5hash string, size int64, errstr string, errcode int) {
+func (gcpimpl *gcpimpl) getobj(fqn string, bucket string, objname string) (nhobj cksumvalue, size int64, errstr string, errcode int) {
+	var (
+		v       cksumvalue
+		md5hash string
+	)
 	client, gcpctx, errstr := createclient()
 	if errstr != "" {
 		return
@@ -136,18 +149,18 @@ func (gcpimpl *gcpimpl) getobj(fqn string, bucket string, objname string) (md5ha
 		errstr = fmt.Sprintf("gcp: Failed to get attributes (object %s, bucket %s), err: %v", objname, bucket, err)
 		return
 	}
-	omd5 := hex.EncodeToString(attrs.MD5)
-
+	v = newcksumvalue(attrs.Metadata[gcpDfcHashType], attrs.Metadata[gcpDfcHashVal])
+	md5 := hex.EncodeToString(attrs.MD5)
 	// FIXME: 'if' block to debug parallel-read
 	if true {
 		md5hash, size, errstr = gcpimpl.readParallel(gcpctx, objhdl, attrs.Size)
 		if errstr != "" {
 			glog.Infof("Error: parallel-read (object %s, bucket %s): %s", objname, bucket, errstr)
-		} else if omd5 == md5hash {
+		} else if md5 == md5hash {
 			glog.Infof("parallel-read (object %s, bucket %s): md5 OK", objname, bucket)
 		} else {
 			glog.Infof("Error: parallel-read (object %s, bucket %s): md5 mismatch (%s != %s)",
-				objname, bucket, omd5[:8], md5hash[:8])
+				objname, bucket, md5[:8], md5hash[:8])
 		}
 	}
 
@@ -157,23 +170,34 @@ func (gcpimpl *gcpimpl) getobj(fqn string, bucket string, objname string) (md5ha
 		return
 	}
 	defer gcpreader.Close()
-	if md5hash, size, errstr = gcpimpl.t.receiveFileAndFinalize(fqn, objname, omd5, gcpreader); errstr != "" {
+	// hashtype and hash could be empty for legacy objects.
+	if nhobj, size, errstr = gcpimpl.t.receiveFileAndFinalize(fqn, objname, md5, v, gcpreader); errstr != "" {
 		return
 	}
-	stats := getstorstats()
-	stats.add("bytesloaded", size)
 	if glog.V(3) {
 		glog.Infof("gcp: GET %s (bucket %s)", objname, bucket)
 	}
 	return
 }
 
-func (gcpimpl *gcpimpl) putobj(file *os.File, bucket, objname string) (errstr string, errcode int) {
+func (gcpimpl *gcpimpl) putobj(file *os.File, bucket, objname string, ohash cksumvalue) (errstr string, errcode int) {
+	var (
+		htype, hval string
+		md          map[string]string
+	)
 	client, gcpctx, errstr := createclient()
 	if errstr != "" {
 		return
 	}
+	if ohash != nil {
+		htype, hval = ohash.get()
+		md = make(map[string]string)
+		md[gcpDfcHashType] = htype
+		md[gcpDfcHashVal] = hval
+	}
 	wc := client.Bucket(bucket).Object(objname).NewWriter(gcpctx)
+	wc.Metadata = md
+
 	buf := gcpimpl.t.buffers.alloc()
 	defer gcpimpl.t.buffers.free(buf)
 	written, err := io.CopyBuffer(wc, file, buf)
@@ -225,17 +249,18 @@ func (gcpimpl *gcpimpl) readParallel(gcpctx context.Context,
 	objhdl *storage.ObjectHandle, osize int64) (md5hash string, size int64, errstr string) {
 	// declare
 	var (
-		buffs      buffif
-		bsize      int64
-		inflight   int
-		woff, roff int64
-		npar       = 16                               // num goroutine readers
-		rq         = make(chan *bufIO, npar)          // receive queue
-		cq         = make(chan *bufIO, npar)          // completion queue
-		eq         = make(chan error, npar)           // error queue
-		lenring    = npar * 2                         // num reusable buffers and size of the ring
-		ring       = make([]*bufIO, lenring, lenring) // the ring
-		md5        = md5.New()                        // FIXME: debug only
+		buffs       buffif
+		bsize       int64
+		woff, roff  int64
+		inflight    int
+		npar        = 16                               // num goroutine readers
+		lenring     = npar * 2                         // num reusable buffers and size of the ring
+		completions = 0                                // total completions
+		rq          = make(chan *bufIO, npar)          // receive queue
+		cq          = make(chan *bufIO, npar)          // completion queue
+		eq          = make(chan error, npar)           // error queue
+		ring        = make([]*bufIO, lenring, lenring) // the ring
+		md5         = md5.New()                        // FIXME: debug only
 	)
 	if osize > gcpimpl.t.buffers32k.fixedsize {
 		buffs = gcpimpl.t.buffers
@@ -260,7 +285,9 @@ func (gcpimpl *gcpimpl) readParallel(gcpctx context.Context,
 	for i := 0; i < npar && roff < osize; i++ {
 		bio := ring[i]
 		bio.read = 0
+		bio.offset = roff
 		rq <- bio
+
 		inflight++
 		roff += bsize
 	}
@@ -270,6 +297,7 @@ loop: // work
 		select {
 		case <-cq: // handle completions
 			inflight--
+			completions++
 			wpos := int(woff/bsize) % lenring
 			for { // write
 				wbio := ring[wpos]
@@ -322,6 +350,7 @@ loop: // work
 			buffs.free(bio.buf)
 		}
 	}
+	glog.Infof("osize %d, completions %d", osize, completions)
 	if errstr != "" {
 		return
 	}
@@ -339,7 +368,7 @@ func (gcpimpl *gcpimpl) readRange(gcpctx context.Context, objhdl *storage.Object
 	for {
 		select {
 		case bio := <-rq:
-			if bio == nil {
+			if bio == nil { // closed
 				return
 			}
 			toread := int64(len(bio.buf))
