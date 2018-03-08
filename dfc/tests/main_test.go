@@ -42,6 +42,7 @@ const (
 	ColdValidStr   = "coldmd5"
 	ChksumValidStr = "chksum"
 	ColdMD5str     = "coldmd5"
+	PutGetStr      = "putget"
 	DeleteDir      = "/tmp/dfc/delete"
 	DeleteStr      = "delete"
 	largefilesize  = 4 // in MB
@@ -67,6 +68,12 @@ type workres struct {
 type reqError struct {
 	code    int
 	message string
+}
+
+type dfio struct {
+	min  int
+	max  int
+	unit int
 }
 
 func (err reqError) Error() string {
@@ -184,7 +191,7 @@ func Test_delete(t *testing.T) {
 
 	errch := make(chan error, numfiles)
 	filesput := make(chan string, numfiles)
-	putRandomFiles(0, baseseed, 512*1024, numfiles, clibucket, t, nil, errch, filesput, DeleteDir, DeleteStr, "", false)
+	putRandomFiles(0, baseseed, dfio{512, 512, 1024}, numfiles, clibucket, t, nil, errch, filesput, DeleteDir, DeleteStr, "", false)
 	close(filesput)
 
 	// Declare one channel per worker to pass the keyname
@@ -280,7 +287,7 @@ func Test_coldgetmd5(t *testing.T) {
 	cksumconfig := config["cksum_config"].(map[string]interface{})
 	bcoldget := cksumconfig["validate_cold_get"].(bool)
 
-	putRandomFiles(0, baseseed, uint64(largefilesize*1024*1024), numPuts, bucket, t, nil, errch, filesput, ldir, ColdValidStr, "", true)
+	putRandomFiles(0, baseseed, dfio{1, 1, 1024 * 1024}, numPuts, bucket, t, nil, errch, filesput, ldir, ColdValidStr, "", true)
 	selectErr(errch, "put", t, false)
 	close(filesput) // to exit for-range
 	for fname := range filesput {
@@ -292,7 +299,7 @@ func Test_coldgetmd5(t *testing.T) {
 		setConfig("validate_cold_get", strconv.FormatBool(false), proxyurl+"/v1/cluster", httpclient, t)
 	}
 	start := time.Now()
-	getfromfilelist(t, bucket, errch, fileslist, false)
+	getfromfilelist(t, bucket, errch, fileslist, false, false)
 	curr := time.Now()
 	duration := curr.Sub(start)
 	if t.Failed() {
@@ -307,7 +314,7 @@ func Test_coldgetmd5(t *testing.T) {
 		goto cleanup
 	}
 	start = time.Now()
-	getfromfilelist(t, bucket, errch, fileslist, true)
+	getfromfilelist(t, bucket, errch, fileslist, false, true)
 	curr = time.Now()
 	duration = curr.Sub(start)
 	tlogf("GET %d MB with MD5 validation:    %v\n", totalsize, duration)
@@ -530,6 +537,53 @@ func emitError(r *http.Response, err error, errch chan error) {
 	}
 }
 
+func Test_PutGet(t *testing.T) {
+	var (
+		filesput    = make(chan string, numfiles)
+		fileslist   = make([]string, 0, numfiles)
+		errch       = make(chan error, numfiles)
+		bucket      = clibucket
+		start, curr time.Time
+		duration    time.Duration
+		htype       string
+	)
+	// Get Current Config
+	config := getConfig(proxyurl+"/v1/daemon", httpclient, t)
+	cksumconfig := config["cksum_config"].(map[string]interface{})
+	ochksum := cksumconfig["checksum"].(string)
+	if ochksum == dfc.ChecksumXXHash {
+		htype = ochksum
+	}
+	numPuts := numfiles
+	ldir := LocalSrcDir + "/" + PutGetStr
+	if err := dfc.CreateDir(ldir); err != nil {
+		t.Fatalf("Failed to create dir %s, err: %v", ldir, err)
+	}
+	putRandomFiles(0, 0, dfio{1, 32, 1024 * 1024}, int(numPuts), bucket, t, nil, errch, filesput, ldir, PutGetStr, htype, true)
+	selectErr(errch, "put", t, false)
+	close(filesput) // to exit for-range
+	for fname := range filesput {
+		if fname != "" {
+			fileslist = append(fileslist, PutGetStr+"/"+fname)
+		}
+	}
+	start = time.Now()
+	getfromfilelist(t, bucket, errch, fileslist, true, false)
+	curr = time.Now()
+	duration = curr.Sub(start)
+	tlogf("GET %v objects from cache: %v\n", numfiles, duration)
+	selectErr(errch, "get", t, false)
+	//cleanup cache
+	evictobjects(t, fileslist)
+	start = time.Now()
+	getfromfilelist(t, bucket, errch, fileslist, true, true)
+	curr = time.Now()
+	duration = curr.Sub(start)
+	tlogf("GET %v objects without cache: %v\n", numfiles, duration)
+	selectErr(errch, "get", t, false)
+	deletefromfilelist(t, bucket, errch, fileslist)
+	return
+}
 func Test_checksum(t *testing.T) {
 	var (
 		filesput    = make(chan string, 100)
@@ -555,7 +609,7 @@ func Test_checksum(t *testing.T) {
 	if ochksum == dfc.ChecksumXXHash {
 		htype = ochksum
 	}
-	putRandomFiles(0, 0, uint64(largefilesize*1024*1024), int(numPuts), bucket, t, nil, errch, filesput, ldir, ChksumValidStr, htype, true)
+	putRandomFiles(0, 0, dfio{1, 1, 1024 * 1024}, int(numPuts), bucket, t, nil, errch, filesput, ldir, ChksumValidStr, htype, true)
 	selectErr(errch, "put", t, false)
 	close(filesput) // to exit for-range
 	for fname := range filesput {
@@ -580,7 +634,7 @@ func Test_checksum(t *testing.T) {
 		goto cleanup
 	}
 	start = time.Now()
-	getfromfilelist(t, bucket, errch, fileslist, false)
+	getfromfilelist(t, bucket, errch, fileslist, false, false)
 	curr = time.Now()
 	duration = curr.Sub(start)
 	if t.Failed() {
@@ -615,7 +669,7 @@ func Test_checksum(t *testing.T) {
 		goto cleanup
 	}
 	start = time.Now()
-	getfromfilelist(t, bucket, errch, fileslist, true)
+	getfromfilelist(t, bucket, errch, fileslist, false, true)
 	curr = time.Now()
 	duration = curr.Sub(start)
 	tlogf("GET %d MB and validate checksum (%s): %v\n", totalio, clichecksum, duration)
@@ -642,12 +696,12 @@ func deletefromfilelist(t *testing.T, bucket string, errch chan error, fileslist
 	selectErr(errch, "delete", t, false)
 	close(errch)
 }
-func getfromfilelist(t *testing.T, bucket string, errch chan error, fileslist []string, validate bool) {
+func getfromfilelist(t *testing.T, bucket string, errch chan error, fileslist []string, silent bool, validate bool) {
 	getsGroup := &sync.WaitGroup{}
 	for i := 0; i < len(fileslist); i++ {
 		if fileslist[i] != "" {
 			getsGroup.Add(1)
-			go client.Get(proxyurl, bucket, fileslist[i], getsGroup, errch, false, validate)
+			go client.Get(proxyurl, bucket, fileslist[i], getsGroup, errch, silent, validate)
 		}
 	}
 	getsGroup.Wait()

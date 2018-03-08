@@ -94,7 +94,7 @@ func oneSmoke(t *testing.T, filesize int, ratio float32, bseed int64, filesput c
 		wg.Add(1)
 		if (i%2 == 0 && nPut > 0) || nGet == 0 {
 			go func(i int) {
-				putRandomFiles(i, bseed+int64(i), uint64(filesize), numops, clibucket, t, wg, errch, filesput, SmokeDir, smokestr, "", false)
+				putRandomFiles(i, bseed+int64(i), dfio{1, 1, filesize}, numops, clibucket, t, wg, errch, filesput, SmokeDir, smokestr, "", false)
 			}(i)
 			nPut--
 		} else {
@@ -153,8 +153,9 @@ func getRandomFiles(id int, seed int64, numGets int, bucket string, t *testing.T
 	getsGroup.Wait()
 }
 
-func putRandomFiles(id int, seed int64, fileSize uint64, numPuts int, bucket string,
+func putRandomFiles(id int, seed int64, fio dfio, numPuts int, bucket string,
 	t *testing.T, wg *sync.WaitGroup, errch chan error, filesput chan string, dir, keystr, htype string, silent bool) {
+	var size uint64
 	if wg != nil {
 		defer wg.Done()
 	}
@@ -163,9 +164,12 @@ func putRandomFiles(id int, seed int64, fileSize uint64, numPuts int, bucket str
 	buffer := make([]byte, blocksize)
 	for i := 0; i < numPuts; i++ {
 		fname := client.FastRandomFilename(random, fnlen)
-		size := fileSize
-		if size == 0 {
+		if fio.max == 0 {
 			size = uint64(random.Intn(1024)+1) * 1024
+		} else if fio.min == fio.max {
+			size = uint64(fio.max * fio.unit)
+		} else {
+			size = uint64((random.Intn(fio.max-fio.min) + fio.min) * fio.unit)
 		}
 		if _, err := client.WriteRandomData(dir+"/"+fname, buffer, int(size), blocksize, random); err != nil {
 			t.Error(err)
