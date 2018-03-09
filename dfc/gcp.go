@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -261,6 +262,7 @@ func (gcpimpl *gcpimpl) readParallel(gcpctx context.Context,
 		eq          = make(chan error, npar)           // error queue
 		ring        = make([]*bufIO, lenring, lenring) // the ring
 		md5         = md5.New()                        // FIXME: debug only
+		wg          = &sync.WaitGroup{}
 	)
 	if osize > gcpimpl.t.buffers32k.fixedsize {
 		buffs = gcpimpl.t.buffers
@@ -274,14 +276,15 @@ func (gcpimpl *gcpimpl) readParallel(gcpctx context.Context,
 	}
 	// preallocate buffers
 	for i := 0; i < lenring; i++ {
-		bio := &bufIO{offset: roff, buf: buffs.alloc()}
+		bio := &bufIO{buf: buffs.alloc()}
 		ring[i] = bio
 	}
 	// go
 	for i := 0; i < npar; i++ {
-		go gcpimpl.readRange(gcpctx, objhdl, rq, cq, eq, osize)
+		wg.Add(1)
+		go gcpimpl.readRanges(gcpctx, objhdl, rq, cq, eq, osize, wg)
 	}
-	// feed initial batch
+	// initial batch => rq
 	for i := 0; i < npar && roff < osize; i++ {
 		bio := ring[i]
 		bio.read = 0
@@ -295,11 +298,12 @@ func (gcpimpl *gcpimpl) readParallel(gcpctx context.Context,
 loop: // work
 	for woff < osize {
 		select {
-		case <-cq: // handle completions
+		case bio := <-cq: // handle completions
 			inflight--
 			completions++
 			wpos := int(woff/bsize) % lenring
-			for { // write
+			glog.Infoln("completion", bio.offset, bio.read, wpos) // FIXME: debug
+			for {                                                 // write
 				wbio := ring[wpos]
 				if wbio.read == 0 {
 					break
@@ -326,16 +330,17 @@ loop: // work
 				roff += bsize
 			}
 		case err := <-eq:
-			errstr = fmt.Sprintf("gcp rr: %v", err)
+			errstr = fmt.Sprintf("Error gcp readRanges: %v", err)
 			break loop
-		default: // FIXME
+		default: // FIXME: debug only
 			if time.Now().After(tick) {
-				glog.Infoln(woff, roff, osize)
+				glog.Infoln("tick", woff, roff, osize)
 				tick = time.Now().Add(time.Second * 5)
 			}
 		}
 	}
 	close(rq)
+	wg.Wait()
 	// free returned
 	for i := 0; i < lenring; i++ {
 		bio := ring[i]
@@ -363,8 +368,9 @@ loop: // work
 	return
 }
 
-func (gcpimpl *gcpimpl) readRange(gcpctx context.Context, objhdl *storage.ObjectHandle,
-	rq, cq chan *bufIO, eq chan error, osize int64) {
+func (gcpimpl *gcpimpl) readRanges(gcpctx context.Context, objhdl *storage.ObjectHandle,
+	rq, cq chan *bufIO, eq chan error, osize int64, wg *sync.WaitGroup) {
+	defer wg.Done()
 	for {
 		select {
 		case bio := <-rq:
@@ -382,18 +388,31 @@ func (gcpimpl *gcpimpl) readRange(gcpctx context.Context, objhdl *storage.Object
 				cq <- bio
 				return
 			}
-			read, err := gcpreader.Read(bio.buf[:toread])
-			if err != nil {
-				cq <- bio
-				eq <- err
+			if err := gcpimpl.readOneRange(bio, toread, gcpreader, cq, eq); err != nil {
 				return
 			}
-			if int64(read) != toread {
-				glog.Infof("Warning: read != toread %d, %d", read, toread)
-			}
-			bio.read = int(toread) // FIXME
-			cq <- bio
-			gcpreader.Close()
 		}
 	}
+}
+
+func (gcpimpl *gcpimpl) readOneRange(bio *bufIO, toread int64,
+	gcpreader *storage.Reader, cq chan *bufIO, eq chan error) (err error) {
+	var bytes int
+	defer gcpreader.Close()
+	bytes, err = gcpreader.Read(bio.buf[:toread])
+	if err != nil {
+		cq <- bio
+		eq <- err
+		return
+	}
+	if int64(bytes) != toread {
+		err = fmt.Errorf("bytes %d != toread %d", bytes, toread)
+		bio.read = bytes
+		cq <- bio
+		eq <- err
+		return
+	}
+	bio.read = int(toread)
+	cq <- bio
+	return
 }
