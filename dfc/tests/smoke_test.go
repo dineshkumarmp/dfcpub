@@ -94,7 +94,7 @@ func oneSmoke(t *testing.T, filesize int, ratio float32, bseed int64, filesput c
 		wg.Add(1)
 		if (i%2 == 0 && nPut > 0) || nGet == 0 {
 			go func(i int) {
-				putRandomFiles(i, bseed+int64(i), dfio{1, 1, filesize}, numops, clibucket, t, wg, errch, filesput, SmokeDir, smokestr, "", false)
+				putRandomFiles(i, bseed+int64(i), dfio{1, 1, filesize}, numops, clibucket, t, wg, errch, filesput, SmokeDir, smokestr, "", false, false)
 			}(i)
 			nPut--
 		} else {
@@ -154,7 +154,7 @@ func getRandomFiles(id int, seed int64, numGets int, bucket string, t *testing.T
 }
 
 func putRandomFiles(id int, seed int64, fio dfio, numPuts int, bucket string,
-	t *testing.T, wg *sync.WaitGroup, errch chan error, filesput chan string, dir, keystr, htype string, silent bool) {
+	t *testing.T, wg *sync.WaitGroup, errch chan error, filesput chan string, dir, keystr, htype string, silent bool, cleanup bool) {
 	var size uint64
 	if wg != nil {
 		defer wg.Done()
@@ -185,5 +185,16 @@ func putRandomFiles(id int, seed int64, fio dfio, numPuts int, bucket string,
 		// compared to the listbucket call that getRandomFiles does)
 		client.Put(proxyurl, dir+"/"+fname, bucket, keystr+"/"+fname, htype, nil, errch, silent)
 		filesput <- fname
+		if cleanup {
+			fn := dir + "/" + fname
+			if err := os.Remove(fn); err != nil {
+				t.Error(err)
+				if errch != nil {
+					errch <- err
+				}
+				return
+			}
+
+		}
 	}
 }

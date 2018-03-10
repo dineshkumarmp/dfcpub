@@ -24,8 +24,14 @@ import (
 	"github.com/OneOfOne/xxhash"
 )
 
+const (
+	maxidleconn = 1000
+)
+
 var (
-	httpclient = &http.Client{}
+	httpclient = &http.Client{
+		Transport: &http.Transport{MaxIdleConnsPerHost: maxidleconn},
+	}
 )
 
 type reqError struct {
