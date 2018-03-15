@@ -121,8 +121,8 @@ func oneSmoke(t *testing.T, filesize int, ratio float32, bseed int64, filesput c
 				if inmem {
 					sgl = sgls[i]
 				}
-				putRandomFiles(i, bseed+int64(i), uint64(filesize), numops, clibucket, t, nil, errch, filesput,
-					SmokeDir, smokestr, "", false, sgl)
+				putRandomFiles(i, bseed+int64(i), dfio{1, 1, filesize}, numops, clibucket, t, nil, errch, filesput,
+					SmokeDir, smokestr, "", false, false, sgl)
 				wg.Done()
 			}(i)
 			nPut--
@@ -186,14 +186,15 @@ func getRandomFiles(id int, seed int64, numGets int, bucket string, t *testing.T
 	getsGroup.Wait()
 }
 
-func putRandomFiles(id int, seed int64, fileSize uint64, numPuts int, bucket string,
+func putRandomFiles(id int, seed int64, fio dfio, numPuts int, bucket string,
 	t *testing.T, wg *sync.WaitGroup, errch chan error, filesput chan string,
-	dir, keystr, htype string, silent bool, sgl *dfc.SGLIO) {
+	dir, keystr, htype string, silent bool, cleanup bool, sgl *dfc.SGLIO) {
 	var (
 		err       error
 		xxhashstr string
 	)
 
+	var size uint64
 	if wg != nil {
 		defer wg.Done()
 	}
@@ -203,9 +204,12 @@ func putRandomFiles(id int, seed int64, fileSize uint64, numPuts int, bucket str
 	buffer := make([]byte, blocksize)
 	for i := 0; i < numPuts; i++ {
 		fname := client.FastRandomFilename(random, fnlen)
-		size := fileSize
-		if size == 0 {
+		if fio.max == 0 {
 			size = uint64(random.Intn(1024)+1) * 1024
+		} else if fio.min == fio.max {
+			size = uint64(fio.max * fio.unit)
+		} else {
+			size = uint64((random.Intn(fio.max-fio.min) + fio.min) * fio.unit)
 		}
 		if sgl != nil {
 			sgl.Reset()
@@ -228,5 +232,16 @@ func putRandomFiles(id int, seed int64, fileSize uint64, numPuts int, bucket str
 		// compared to the listbucket call that getRandomFiles does)
 		client.Put(proxyurl, dir+"/"+fname, bucket, keystr+"/"+fname, xxhashstr, sgl, nil, errch, silent)
 		filesput <- fname
+		if cleanup {
+			fn := dir + "/" + fname
+			if err := os.Remove(fn); err != nil {
+				t.Error(err)
+				if errch != nil {
+					errch <- err
+				}
+				return
+			}
+
+		}
 	}
 }

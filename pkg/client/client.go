@@ -27,15 +27,20 @@ import (
 	"github.com/OneOfOne/xxhash"
 )
 
-var (
-	httpclient          = &http.Client{}
-	httpclientNoTimeout = &http.Client{Timeout: 0}
+const (
+	maxidleconn = 64000
+)
 
+var (
 	ProxyProto      = "http"
 	ProxyIP         = "localhost"
 	ProxyPort       = 8080
 	RestAPIVersion  = "v1"
 	RestAPIResource = "files"
+	httpclient      = &http.Client{
+		Transport: &http.Transport{MaxIdleConnsPerHost: maxidleconn},
+	}
+	httpclientNoTimeout = &http.Client{Timeout: 0}
 )
 
 type reqError struct {

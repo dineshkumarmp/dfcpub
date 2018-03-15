@@ -151,7 +151,7 @@ func regressionBucket(httpclient *http.Client, t *testing.T, bucket string) {
 		sgl = dfc.NewSGLIO(filesize)
 		defer sgl.Free()
 	}
-	putRandomFiles(0, baseseed+2, filesize, numPuts, bucket, t, nil, errch, filesput, SmokeDir, smokestr, "", false, sgl)
+	putRandomFiles(0, baseseed+2, dfio{1, 1, 1024}, numPuts, bucket, t, nil, errch, filesput, SmokeDir, smokestr, "", false, false, sgl)
 	close(filesput)
 	selectErr(errch, "put", t, false)
 	getRandomFiles(0, 0, numPuts, bucket, t, nil, errch)
@@ -423,7 +423,7 @@ func regressionRebalance(t *testing.T) {
 		sgl = dfc.NewSGLIO(filesize)
 		defer sgl.Free()
 	}
-	putRandomFiles(0, baseseed, filesize, numPuts, clibucket, t, nil, errch, filesput, SmokeDir, smokestr, "", false, sgl)
+	putRandomFiles(0, baseseed, dfio{1, 1, 1024 * 128}, numPuts, clibucket, t, nil, errch, filesput, SmokeDir, smokestr, "", false, false, sgl)
 	selectErr(errch, "put", t, false)
 
 	//
@@ -526,7 +526,7 @@ func regressionRename(t *testing.T) {
 		sgl := dfc.NewSGLIO(1024 * 1024)
 		defer sgl.Free()
 	}
-	putRandomFiles(0, baseseed+1, 0, numPuts, RenameLocalBucketName, t, nil, nil, filesput, RenameDir, RenameStr, "", false, sgl)
+	putRandomFiles(0, baseseed+1, dfio{0, 0, 0}, numPuts, RenameLocalBucketName, t, nil, nil, filesput, RenameDir, RenameStr, "", false, false, sgl)
 	selectErr(errch, "put", t, false)
 	close(filesput)
 	for fname := range filesput {
