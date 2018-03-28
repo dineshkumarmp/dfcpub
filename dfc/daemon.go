@@ -47,7 +47,7 @@ type Smap struct {
 	sync.Mutex
 	Smap        map[string]*daemonInfo `json:"smap"` // daemonID -> daemonInfo
 	Pmap        map[string]*proxyInfo  `json:"pmap"` // proxyID -> proxyInfo
-	ProxySI     *daemonInfo            `json:"proxy_si"`
+	ProxySI     *proxyInfo             `json:"proxy_si"`
 	Version     int64                  `json:"version"`
 	syncversion int64
 }
@@ -61,7 +61,6 @@ type mountedFS struct {
 
 // daemon instance: proxy or storage target
 type daemon struct {
-	smap       *Smap
 	config     dfconfig
 	mountpaths mountedFS
 	rg         *rungroup
@@ -322,7 +321,6 @@ func dfcinit() {
 			//	clivars.ntargets)
 		}
 		confdir := ctx.config.Confdir
-		ctx.smap = &Smap{Smap: make(map[string]*daemonInfo, 8), Pmap: make(map[string]*proxyInfo, 8)}
 		p := &proxyrunner{confdir: confdir}
 		ctx.rg.add(p, xproxy)
 		ctx.rg.add(&proxystatsrunner{}, xproxystats)

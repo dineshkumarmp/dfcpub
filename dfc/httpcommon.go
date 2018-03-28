@@ -95,6 +95,8 @@ type httprunner struct {
 	httpclientLongTimeout *http.Client // http client for long-wait intra-cluster comm
 	statsif               statsif
 	kalive                kaliveif
+	proxysi               *proxyInfo
+	smap                  *Smap
 }
 
 func (h *httprunner) registerhdlr(path string, handler func(http.ResponseWriter, *http.Request)) {
@@ -123,6 +125,8 @@ func (h *httprunner) init(s statsif) {
 	h.si = &daemonInfo{}
 	h.si.NodeIPAddr = ipaddr
 	h.si.DaemonPort = ctx.config.Listen.Port
+
+	h.smap = &Smap{}
 
 	id := os.Getenv("DFCDAEMONID")
 	if id != "" {

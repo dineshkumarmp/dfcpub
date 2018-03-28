@@ -138,7 +138,7 @@ func (r *proxykalive) keepalive(err error) (stopped bool) {
 		glog.Infof("keepalive-alltargets: got err %v, checking now...", err)
 	}
 	from := "?" + URLParamFromID + "=" + r.p.si.DaemonID
-	for sid, si := range ctx.smap.Smap {
+	for sid, si := range r.p.smap.Smap {
 		if r.skipCheck(sid) {
 			continue
 		}
@@ -166,9 +166,9 @@ func (r *proxykalive) keepalive(err error) (stopped bool) {
 		} else {
 			glog.Errorf("Target %s fails keepalive, err: %v - removing from the cluster map", sid, err)
 		}
-		ctx.smap.lock()
-		ctx.smap.del(sid)
-		ctx.smap.unlock()
+		r.p.smap.lock()
+		r.p.smap.del(sid)
+		r.p.smap.unlock()
 	}
 	return false
 }

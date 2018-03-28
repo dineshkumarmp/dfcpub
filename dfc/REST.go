@@ -172,4 +172,5 @@ const (
 	Rtarget    = "target"
 	Rproxy     = "proxy"
 	Rvoteres   = "result"
+	Rvoteinit  = "init" //FIXME better naming
 )

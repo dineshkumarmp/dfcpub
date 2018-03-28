@@ -73,8 +73,6 @@ type uxprocess struct {
 type targetrunner struct {
 	httprunner
 	cloudif       cloudif // multi-cloud vendor support
-	smap          *Smap
-	proxysi       *daemonInfo
 	xactinp       *xactInProgress
 	uxprocess     *uxprocess
 	lbmap         *lbmap
@@ -86,7 +84,6 @@ type targetrunner struct {
 func (t *targetrunner) run() error {
 	t.httprunner.init(getstorstatsrunner())
 	t.httprunner.kalive = gettargetkalive()
-	t.smap = &Smap{}                                 // cluster map
 	t.xactinp = newxactinp()                         // extended actions
 	t.lbmap = &lbmap{LBmap: make(map[string]string)} // local (cache-only) buckets
 	t.rtnamemap = newrtnamemap(128)                  // lock/unlock name
@@ -157,6 +154,7 @@ func (t *targetrunner) run() error {
 	t.httprunner.registerhdlr("/"+Rversion+"/"+Rdaemon+"/", t.daemonhdlr) // FIXME
 	t.httprunner.registerhdlr("/"+Rversion+"/"+Rpush+"/", t.pushhdlr)
 	t.httprunner.registerhdlr("/"+Rversion+"/"+Rhealth, t.httphealth)
+	t.httprunner.registerhdlr("/"+Rversion+"/"+Rvote+"/", t.votehdlr)
 	t.httprunner.registerhdlr("/", invalhdlr)
 	glog.Infof("Target %s is ready", t.si.DaemonID)
 	glog.Flush()
@@ -185,20 +183,40 @@ func (t *targetrunner) register(timeout time.Duration) (status int, err error) {
 	if err != nil {
 		return 0, fmt.Errorf("Unexpected failure to json-marshal %+v, err: %v", t.si, err)
 	}
-	url := ctx.config.Proxy.URL + "/" + Rversion + "/" + Rcluster
+
+	var url string
+	if t.proxysi != nil {
+		url = t.proxysi.DirectURL
+	} else {
+		// Smap has not yet been synched:
+		url = ctx.config.Proxy.URL
+	}
+	url += "/" + Rversion + "/" + Rcluster
+
+	var si *daemonInfo
+	if t.proxysi != nil {
+		si = &t.proxysi.daemonInfo
+	}
+
 	if timeout > 0 { // keepalive
 		url += "/" + Rkeepalive
-		_, err, _, status = t.call(t.proxysi, url, http.MethodPost, jsbytes, timeout)
+		_, err, _, status = t.call(si, url, http.MethodPost, jsbytes, timeout)
 	} else {
-		_, err, _, status = t.call(t.proxysi, url, http.MethodPost, jsbytes)
+		_, err, _, status = t.call(si, url, http.MethodPost, jsbytes)
 	}
 	return
 }
 
 func (t *targetrunner) unregister() (status int, err error) {
-	url := ctx.config.Proxy.URL + "/" + Rversion + "/" + Rcluster
-	url += "/" + Rdaemon + "/" + t.si.DaemonID
-	_, err, _, status = t.call(t.proxysi, url, http.MethodDelete, nil)
+	var url string
+	if t.proxysi != nil {
+		url = t.proxysi.DirectURL
+	} else {
+		// Smap has not yet been synched:
+		url = ctx.config.Proxy.URL
+	}
+	url += "/" + Rversion + "/" + Rcluster + "/" + Rdaemon + "/" + t.si.DaemonID
+	_, err, _, status = t.call(&t.proxysi.daemonInfo, url, http.MethodDelete, nil)
 	return
 }
 
