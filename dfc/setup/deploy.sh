@@ -8,6 +8,7 @@
 
 export GOOGLE_CLOUD_PROJECT="involuted-forge-189016"
 PROXYURL="http://localhost:8080"
+PROXYID="50011:8080"
 PORT=8079
 LOGLEVEL="3" # Verbosity: 0 (minimal) to 4 (max)
 LOGROOT="/tmp/dfc"

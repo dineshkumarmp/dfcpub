@@ -18,6 +18,7 @@
 		"port":			"${PORT}"
 	},
 	"proxy": {
+		"id":			"${PROXYID}",
 		"url": 			"${PROXYURL}",
 		"passthru": 		true
 	},

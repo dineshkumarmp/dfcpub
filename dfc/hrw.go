@@ -16,7 +16,7 @@ const mLCG32 = 1103515245
 
 func hrwTarget(name string, smap *Smap) (si *daemonInfo, errstr string) {
 	// NOTE: commented out on purpose - trading off read access to unlocked map
-	//       smap.lock.Lock(); defer smap.lock.Unlock()
+	//       smap.Lock(); defer smap.Unlock()
 	if smap.count() == 0 {
 		errstr = "DFC cluster map is empty: no targets"
 		return
@@ -27,6 +27,24 @@ func hrwTarget(name string, smap *Smap) (si *daemonInfo, errstr string) {
 		if cs > max {
 			max = cs
 			si = sinfo
+		}
+	}
+	return
+}
+
+func hrwProxy(smap *Smap) (pi *proxyInfo, errstr string) {
+	smap.Lock()
+	defer smap.Unlock()
+	if smap.count() == 0 {
+		errstr = "DFC cluster map is empty: no targets"
+		return
+	}
+	var max uint64
+	for id, sinfo := range smap.Pmap {
+		cs := xxhash.ChecksumString64S(id, mLCG32)
+		if cs > max {
+			max = cs
+			pi = sinfo
 		}
 	}
 	return

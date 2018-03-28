@@ -78,6 +78,31 @@ func (p *proxyrunner) run() error {
 	}
 	p.lbmap.unlock()
 
+	// Register proxy if it isn't the Primary proxy
+	if ctx.config.Proxy.ID != p.si.DaemonID {
+		glog.Errorf("Proxy (%s) is not primary proxy (%s), registering.", p.si.DirectURL, ctx.config.Proxy.URL)
+		if status, err := p.register(0); err != nil {
+			glog.Errorf("Proxy %s failed to register with primary proxy, err: %v", p.si.DaemonID, err)
+			if IsErrConnectionRefused(err) || status == http.StatusRequestTimeout {
+				glog.Errorf("Proxy %s: retrying registration...", p.si.DaemonID)
+				time.Sleep(time.Second * 3)
+				if _, err = p.register(0); err != nil {
+					glog.Errorf("Proxy %s failed to register with primary proxy, err: %v", p.si.DaemonID, err)
+					glog.Errorf("Proxy %s is terminating", p.si.DaemonID)
+					return err
+				}
+			} else {
+				return err
+			}
+		}
+		glog.Errorf("Success: proxy %s joined the cluster", p.si.DaemonID)
+	} else {
+		ctx.smap.addProxy(&proxyInfo{
+			daemonInfo: *p.si,
+			Primary:    true,
+		})
+	}
+
 	// startup: sync local buckets and cluster map when the latter stabilizes
 	go p.synchronizeMaps(clivars.ntargets, "")
 
@@ -97,6 +122,28 @@ func (p *proxyrunner) run() error {
 	return p.httprunner.run()
 }
 
+func (p *proxyrunner) register(timeout time.Duration) (status int, err error) {
+	jsbytes, err := json.Marshal(p.si)
+	assert(err == nil)
+
+	//TODO: Convert ctx.config.Proxy.URL usages to p/t.PrimaryProxyURL
+	url := ctx.config.Proxy.URL + "/" + Rversion + "/" + Rcluster + "/" + Rproxy
+	if timeout > 0 {
+		//FIXME keepalive w/ proxy
+		url += "/" + Rkeepalive
+		_, err, _, status = p.call(nil, url, http.MethodPost, jsbytes, timeout)
+	} else {
+		_, err, _, status = p.call(nil, url, http.MethodPost, jsbytes)
+	}
+	return
+}
+
+func (p *proxyrunner) unregister() (status int, err error) {
+	url := fmt.Sprintf("%s/%s/%s/%s/%s/%s", ctx.config.Proxy.URL, Rversion, Rcluster, Rdaemon, Rproxy, p.si.DaemonID)
+	_, err, _, status = p.call(nil, url, http.MethodDelete, nil)
+	return
+}
+
 // stop gracefully
 func (p *proxyrunner) stop(err error) {
 	glog.Infof("Stopping %s, err: %v", p.name, err)
@@ -114,6 +161,9 @@ func (p *proxyrunner) stop(err error) {
 			continue
 		}
 		break
+	}
+	if p.httprunner.h != nil {
+		p.unregister()
 	}
 	p.httprunner.stop(err)
 }
@@ -936,6 +986,7 @@ func (p *proxyrunner) httpclupost(w http.ResponseWriter, r *http.Request) {
 		osi       *daemonInfo
 		nsi       daemonInfo
 		keepalive bool
+		proxy     bool
 	)
 	apitems := p.restAPIItems(r.URL.Path, 5)
 	if apitems = p.checkRestAPI(w, r, apitems, 0, Rversion, Rcluster); apitems == nil {
@@ -943,6 +994,7 @@ func (p *proxyrunner) httpclupost(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(apitems) > 0 {
 		keepalive = (apitems[0] == Rkeepalive)
+		proxy = (apitems[0] == Rproxy)
 	}
 	if p.readJSON(w, r, &nsi) != nil {
 		return
@@ -977,7 +1029,15 @@ func (p *proxyrunner) httpclupost(w http.ResponseWriter, r *http.Request) {
 		// fall through
 	}
 add:
-	ctx.smap.add(&nsi)
+	if proxy {
+		pi := proxyInfo{
+			daemonInfo: nsi,
+			Primary:    false, // This proxy is the primary, so the newly registered one cannot be.
+		}
+		ctx.smap.addProxy(&pi)
+	} else {
+		ctx.smap.add(&nsi)
+	}
 	ctx.smap.unlock()
 	if glog.V(3) {
 		glog.Infof("register target %s (count %d)", nsi.DaemonID, ctx.smap.count())
@@ -987,7 +1047,7 @@ add:
 
 // unregisters a target
 func (p *proxyrunner) httpcludel(w http.ResponseWriter, r *http.Request) {
-	apitems := p.restAPIItems(r.URL.Path, 5)
+	apitems := p.restAPIItems(r.URL.Path, 6)
 	if apitems = p.checkRestAPI(w, r, apitems, 2, Rversion, Rcluster); apitems == nil {
 		return
 	}
@@ -997,13 +1057,28 @@ func (p *proxyrunner) httpcludel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sid := apitems[1]
+	proxy := false
+	if sid == Rproxy {
+		proxy = true // FIXME: Better way of doing this?
+		sid = apitems[2]
+	}
 	ctx.smap.lock()
-	if ctx.smap.get(sid) == nil {
+	if !proxy && ctx.smap.get(sid) == nil {
 		glog.Errorf("Unknown target %s", sid)
 		ctx.smap.unlock()
 		return
 	}
-	ctx.smap.del(sid)
+	if proxy && ctx.smap.getProxy(sid) == nil {
+		glog.Errorf("Unknown proxy %s,", sid)
+		ctx.smap.unlock()
+		return
+	}
+
+	if proxy {
+		ctx.smap.delProxy(sid)
+	} else {
+		ctx.smap.del(sid)
+	}
 	ctx.smap.unlock()
 	//
 	// TODO: startup -- leave --

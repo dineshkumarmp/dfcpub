@@ -60,6 +60,7 @@ if [ -z "$aws_env" ]; then
 fi
 
 PROXYURL="http://dfcproxy:8080"
+PROXYID="50011:8080"
 PORT=8080
 SERVICENAME="dfc"
 LOGDIR="/tmp/dfc/log"

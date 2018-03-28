@@ -105,7 +105,8 @@ type listenconfig struct {
 }
 
 type proxyconfig struct {
-	URL      string `json:"url"`      // used to register caching servers
+	ID       string `json:"id"`       // used to register caching servers/other proxies
+	URL      string `json:"url"`      // used to register caching servers/other proxies
 	Passthru bool   `json:"passthru"` // false: get then redirect, true (default): redirect right away
 }
 
