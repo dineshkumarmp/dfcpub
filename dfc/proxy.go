@@ -133,8 +133,14 @@ func (p *proxyrunner) register(timeout time.Duration) (status int, err error) {
 	jsbytes, err := json.Marshal(p.si)
 	assert(err == nil)
 
-	//TODO: Convert ctx.config.Proxy.URL usages to p/t.PrimaryProxyURL
-	url := ctx.config.Proxy.URL + "/" + Rversion + "/" + Rcluster + "/" + Rproxy
+	var url string
+	if p.proxysi != nil {
+		url = p.proxysi.DirectURL
+	} else {
+		// Smap has not yet been synced
+		url = ctx.config.Proxy.URL
+	}
+	url += "/" + Rversion + "/" + Rcluster + "/" + Rproxy
 	if timeout > 0 {
 		//FIXME keepalive w/ proxy
 		url += "/" + Rkeepalive
