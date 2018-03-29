@@ -166,6 +166,9 @@ func (m *Smap) count() int {
 	return len(m.Smap)
 }
 
+func (m *Smap) countProxies() int {
+	return len(m.Pmap)
+}
 func (m *Smap) countLocked() int {
 	m.lock()
 	defer m.unlock()

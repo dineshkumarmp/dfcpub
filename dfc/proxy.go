@@ -1017,7 +1017,6 @@ func (p *proxyrunner) httpclugetstats(w http.ResponseWriter, r *http.Request, ge
 // register|keepalive target
 func (p *proxyrunner) httpclupost(w http.ResponseWriter, r *http.Request) {
 	var (
-		osi       *daemonInfo
 		nsi       daemonInfo
 		keepalive bool
 		proxy     bool
@@ -1029,6 +1028,9 @@ func (p *proxyrunner) httpclupost(w http.ResponseWriter, r *http.Request) {
 	if len(apitems) > 0 {
 		keepalive = (apitems[0] == Rkeepalive)
 		proxy = (apitems[0] == Rproxy)
+		if proxy && len(apitems) > 1 {
+			keepalive = (apitems[1] == Rkeepalive)
+		}
 	}
 	if p.readJSON(w, r, &nsi) != nil {
 		return
@@ -1039,44 +1041,78 @@ func (p *proxyrunner) httpclupost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.statsif.add("numpost", 1)
-	p.smap.lock()
-	osi = p.smap.get(nsi.DaemonID)
+
+	if proxy {
+		p.registerproxy(nsi, keepalive)
+	} else {
+		p.registertarget(nsi, keepalive)
+	}
+
+	go p.synchronizeMaps(0, "")
+}
+
+func (p *proxyrunner) shouldAddToSmap(nsi *daemonInfo, osi *daemonInfo, keepalive bool) bool {
 	if keepalive {
 		if osi == nil {
-			glog.Warningf("register/keepalive target %s: adding back to the cluster map", nsi.DaemonID)
-			goto add
+			glog.Warningf("register/keepalive proxy %s: adding back to the cluster map", nsi.DaemonID)
+			return true
 		}
 		if osi.NodeIPAddr != nsi.NodeIPAddr || osi.DaemonPort != nsi.DaemonPort {
 			glog.Warningf("register/keepalive target %s: info changed - renewing", nsi.DaemonID)
-			goto add
+			return true
 		}
-		p.smap.unlock()
 		p.kalive.timestamp(nsi.DaemonID)
-		return
+		return false
 	}
 	if osi != nil {
 		if osi.NodeIPAddr == nsi.NodeIPAddr && osi.DaemonPort == nsi.DaemonPort && osi.DirectURL == nsi.DirectURL {
-			glog.Infof("register target %s: already done", nsi.DaemonID)
+			glog.Infof("register proxy %s: already done", nsi.DaemonID)
+			return false
 		} else {
-			glog.Errorf("register target %s: renewing the registration %+v => %+v", nsi.DaemonID, osi, nsi)
+			glog.Errorf("register proxy %s: renewing the registration %+v => %+v", nsi.DaemonID, osi, nsi)
+			return true
 		}
-		// fall through
 	}
-add:
-	if proxy {
-		pi := proxyInfo{
-			daemonInfo: nsi,
-			Primary:    false, // This proxy is the primary, so the newly registered one cannot be.
-		}
-		p.smap.addProxy(&pi)
-	} else {
-		p.smap.add(&nsi)
+	return true
+}
+
+func (p *proxyrunner) registerproxy(nsi daemonInfo, keepalive bool) {
+	p.smap.Lock()
+	defer p.smap.unlock()
+
+	pi := proxyInfo{
+		daemonInfo: nsi,
+		Primary:    false, // This proxy is the primary, so the newly registered one cannot be.
 	}
-	p.smap.unlock()
+	osi := p.smap.getProxy(nsi.DaemonID)
+	var osidi *daemonInfo
+	if osi != nil {
+		osidi = &osi.daemonInfo
+
+	}
+
+	if !p.shouldAddToSmap(&nsi, osidi, keepalive) {
+		return
+	}
+	p.smap.addProxy(&pi)
+	if glog.V(3) {
+		glog.Infof("register proxy %s (count %d)", nsi.DaemonID, p.smap.count())
+	}
+}
+
+func (p *proxyrunner) registertarget(nsi daemonInfo, keepalive bool) {
+	p.smap.lock()
+	defer p.smap.unlock()
+	osi := p.smap.get(nsi.DaemonID)
+
+	if !p.shouldAddToSmap(&nsi, osi, keepalive) {
+		return
+	}
+
+	p.smap.add(&nsi)
 	if glog.V(3) {
 		glog.Infof("register target %s (count %d)", nsi.DaemonID, p.smap.count())
 	}
-	go p.synchronizeMaps(0, "")
 }
 
 // unregisters a target

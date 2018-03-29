@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/golang/glog"
 	"golang.org/x/net/context/ctxhttp"
 )
 
@@ -31,6 +32,8 @@ func (t *targetrunner) votehdlr(w http.ResponseWriter, r *http.Request) {
 	switch apitems[0] {
 	case Rtarget:
 		t.httptargetvote(w, r)
+	case Rproxy:
+		t.httpproxyvote(w, r)
 	case Rvoteres:
 		t.httpsetprimaryproxy(w, r)
 	}
@@ -79,9 +82,9 @@ func (t *targetrunner) httptargetvote(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET "/"+Rversion+"/"+Rvote+"/"+Rvotepxy+"?"+ParamPrimaryCandidate+"="
-func (p *proxyrunner) httpproxyvote(w http.ResponseWriter, r *http.Request) {
-	apitems := p.restAPIItems(r.URL.Path, 5)
-	if apitems = p.checkRestAPI(w, r, apitems, 1, Rversion, Rvote); apitems == nil {
+func (h *httprunner) httpproxyvote(w http.ResponseWriter, r *http.Request) {
+	apitems := h.restAPIItems(r.URL.Path, 5)
+	if apitems = h.checkRestAPI(w, r, apitems, 1, Rversion, Rvote); apitems == nil {
 		return
 	}
 
@@ -89,21 +92,21 @@ func (p *proxyrunner) httpproxyvote(w http.ResponseWriter, r *http.Request) {
 	candidate := query.Get(URLParamPrimaryCandidate)
 	if candidate == "" {
 		s := fmt.Sprintf("Cannot request vote without %s query parameter.", URLParamPrimaryCandidate)
-		p.invalmsghdlr(w, r, s)
+		h.invalmsghdlr(w, r, s)
 		return
 	}
 
-	proxyinfo, ok := p.smap.Pmap[candidate]
+	proxyinfo, ok := h.smap.Pmap[candidate]
 	if !ok {
 		s := fmt.Sprintf("Candidate not present in proxy smap: %s", candidate)
-		p.invalmsghdlr(w, r, s)
+		h.invalmsghdlr(w, r, s)
 		return
 	}
 
-	hrwmax, errstr := hrwProxy(p.smap)
+	hrwmax, errstr := hrwProxy(h.smap)
 	if errstr != "" {
 		s := fmt.Sprintf("Error executing HRW: %v", errstr)
-		p.invalmsghdlr(w, r, s)
+		h.invalmsghdlr(w, r, s)
 		return
 	}
 
@@ -213,16 +216,29 @@ func (p *proxyrunner) PingWithTimeout(url string, timeout time.Duration) (bool, 
 
 func (p *proxyrunner) ElectAmongProxies() (winner bool, err error) {
 	// Currently: Simple Majority
+	p.smap.Lock() // FIXME: co-opting smap lock?
+	defer p.smap.Unlock()
+	if p.primary {
+		// We have already won this election; No need to elect again.
+		// FIXME: xaction
+		return
+	}
 	wg := &sync.WaitGroup{}
-	resch := make(chan bool, len(p.smap.Pmap)-1)
-	errch := make(chan error, len(p.smap.Pmap)-1)
+	chansize := p.smap.count() + p.smap.countProxies() - 1
+	resch := make(chan bool, chansize)
+	errch := make(chan error, chansize)
 	defer close(errch)
 	for _, pi := range p.smap.Pmap {
 		if pi.DaemonID != p.si.DaemonID && pi.DaemonID != p.proxysi.DaemonID {
 			// Do not request a vote from this proxy, or the previous primary (Because it is down)
 			wg.Add(1)
-			go p.RequestVote(pi, wg, resch, errch)
+			go p.RequestVote(&pi.daemonInfo, wg, resch, errch)
 		}
+	}
+	for _, pi := range p.smap.Smap {
+		// Do not request a vote from this proxy, or the previous primary (Because it is down)
+		wg.Add(1)
+		go p.RequestVote(pi, wg, resch, errch)
 	}
 	wg.Wait()
 	close(resch)
@@ -265,12 +281,12 @@ func (p *proxyrunner) ConfirmElectionVictory() error {
 	return nil
 }
 
-func (p *proxyrunner) RequestVote(pi *proxyInfo, wg *sync.WaitGroup, resultch chan bool, errch chan error) {
+func (p *proxyrunner) RequestVote(si *daemonInfo, wg *sync.WaitGroup, resultch chan bool, errch chan error) {
 	defer wg.Done()
-	url := fmt.Sprintf("%s/%s/%s?%s=%s", pi.DirectURL, Rvote, Rproxy, URLParamPrimaryCandidate, p.si.DaemonID)
+	url := fmt.Sprintf("%s/%s/%s/%s?%s=%s", si.DirectURL, Rversion, Rvote, Rproxy, URLParamPrimaryCandidate, p.si.DaemonID)
 	r, err := p.httpclient.Get(url)
 	if err != nil {
-		e := fmt.Errorf("Error requesting vote from %s(%s): %v", pi.DaemonID, pi.DirectURL, err)
+		e := fmt.Errorf("Error requesting vote from %s(%s): %v", si.DaemonID, si.DirectURL, err)
 		errch <- e
 		return
 	}
@@ -282,7 +298,7 @@ func (p *proxyrunner) RequestVote(pi *proxyInfo, wg *sync.WaitGroup, resultch ch
 
 	respbytes, err := ioutil.ReadAll(r.Body)
 	if err != nil {
-		e := fmt.Errorf("Error reading response from %s(%s): %v", pi.DaemonID, pi.DirectURL, err)
+		e := fmt.Errorf("Error reading response from %s(%s): %v", si.DaemonID, si.DirectURL, err)
 		errch <- e
 		return
 	}
@@ -296,5 +312,34 @@ func (p *proxyrunner) SetNewPrimaryProxy(pi *proxyInfo, wg *sync.WaitGroup, errc
 }
 
 func (p *proxyrunner) BecomePrimaryProxy() {
-	//TODO
+	p.primary = true
+	p.smap.getProxy(p.si.DaemonID).Primary = true
+	p.smap.ProxySI = p.smap.getProxy(p.si.DaemonID)
+}
+
+func (h *httprunner) onPrimaryProxyFailure() {
+	fmt.Println("Primary Proxy Failed")
+	h.smap.delProxy(h.proxysi.DaemonID)
+
+	nextPrimaryProxy, errstr := hrwProxy(h.smap)
+	if errstr != "" {
+		glog.Errorf("Failed to execute hrwProxy after Primary Proxy Failure: %v", errstr)
+	}
+	h.proxysi = nextPrimaryProxy
+
+	url := nextPrimaryProxy.DirectURL + "/" + Rversion + "/" + Rvote + "/" + Rvoteinit
+	r, err := h.httpclient.Get(url)
+	if err != nil {
+		glog.Errorf("Failed to request election from next Primary Proxy: %v", err)
+	}
+	defer func() {
+		if r.Body != nil {
+			r.Body.Close()
+		}
+	}()
+
+	_, err = ioutil.ReadAll(r.Body)
+	if err != nil {
+		glog.Errorf("Failed to request election from next Primary Proxy: %v", err)
+	}
 }

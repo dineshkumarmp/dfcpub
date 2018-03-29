@@ -122,12 +122,85 @@ func (r *kalive) stop(err error) {
 	close(r.chstop)
 }
 
+//===============================================
+//
+// Generic Keepalive (Non-Primary Proxy & Target)
+//
+//===============================================
+type Registerer interface {
+	// FIXME: Registerer sounds awkward, but it matches the golang interface naming convention.
+	register(timeout time.Duration) (int, error)
+}
+
+func keepalive(r Registerer, chstop chan struct{}, err error) (stopped bool) {
+	timeout := kalivetimeout
+	status, err := r.register(timeout)
+	if err == nil {
+		return
+	}
+	if status > 0 {
+		glog.Infof("Warning: keepalive failed with status %d, err: %v", status, err)
+	} else {
+		glog.Infof("Warning: keepalive failed, err: %v", err)
+	}
+	// until success or stop
+	poller := time.NewTicker(targetpollivl)
+	defer poller.Stop()
+	failstreak := 1
+	for {
+		select {
+		case <-poller.C:
+			status, err := r.register(timeout)
+			if err == nil {
+				glog.Infoln("keepalive: successfully re-registered")
+				return
+			}
+			timeout = time.Duration(float64(timeout)*1.5 + 0.5)
+			if timeout > ctx.config.HTTP.Timeout {
+				timeout = ctx.config.HTTP.Timeout
+			}
+			if status > 0 {
+				glog.Infof("Warning: keepalive failed with status %d, err: %v", status, err)
+			} else {
+				glog.Infof("Warning: keepalive failed, err: %v", err)
+			}
+			failstreak++
+			if failstreak > 3 {
+				stopped = true
+				return
+			}
+			if IsErrConnectionRefused(err) || status == http.StatusRequestTimeout {
+				continue
+			}
+			glog.Warningf("keepalive: Unexpected status %d, err: %v", status, err)
+		case <-chstop:
+			stopped = true
+			return
+		}
+	}
+}
+
 //==========================================
 //
 // proxykalive: implements kaliveif
 //
 //===========================================
 func (r *proxykalive) keepalive(err error) (stopped bool) {
+	if r.p.primary {
+		return r.primarykeepalive(err)
+	}
+
+	if r.p.proxysi == nil || r.skipCheck(r.p.proxysi.DaemonID) {
+		return
+	}
+	stopped = keepalive(r.p, r.chstop, err)
+	if stopped {
+		r.p.onPrimaryProxyFailure()
+	}
+	return stopped
+}
+
+func (r *proxykalive) primarykeepalive(err error) (stopped bool) {
 	aval := time.Now().Unix()
 	if !atomic.CompareAndSwapInt64(&r.atomic, 0, aval) {
 		glog.Infof("keepalive-alltargets is in progress...")
@@ -215,38 +288,9 @@ func (r *targetkalive) keepalive(err error) (stopped bool) {
 	if r.t.proxysi == nil || r.skipCheck(r.t.proxysi.DaemonID) {
 		return
 	}
-	timeout := kalivetimeout
-	status, err := r.t.register(timeout)
-	if err == nil {
-		return
+	stopped = keepalive(r.t, r.chstop, err)
+	if stopped {
+		r.t.onPrimaryProxyFailure()
 	}
-	if status > 0 {
-		glog.Infof("Warning: keepalive failed with status %d, err: %v", status, err)
-	} else {
-		glog.Infof("Warning: keepalive failed, err: %v", err)
-	}
-	// until success or stop
-	poller := time.NewTicker(targetpollivl)
-	defer poller.Stop()
-	for {
-		select {
-		case <-poller.C:
-			status, err := r.t.register(timeout)
-			if err == nil {
-				glog.Infoln("keepalive: successfully re-registered")
-				return
-			}
-			timeout = time.Duration(float64(timeout)*1.5 + 0.5)
-			if timeout > ctx.config.HTTP.Timeout {
-				timeout = ctx.config.HTTP.Timeout
-			}
-			if IsErrConnectionRefused(err) || status == http.StatusRequestTimeout {
-				continue
-			}
-			glog.Warningf("keepalive: Unexpected status %d, err: %v", status, err)
-		case <-r.chstop:
-			stopped = true
-			return
-		}
-	}
+	return stopped
 }
