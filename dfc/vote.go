@@ -1,7 +1,9 @@
 package dfc
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -23,6 +25,25 @@ const (
 	ProxyPingTimeout = 100 * time.Millisecond
 )
 
+//==========
+//
+// Messages
+// FIXME: Move to REST.go when finalized
+//
+//==========
+
+type VoteMessage struct {
+	Candidate   string `json:"candidate"`
+	SmapVersion int64  `json:"smapVersion"`
+}
+
+//==========
+//
+// Handlers
+//
+//==========
+
+// "/"+Rversion+"/"+Rvote+"/"
 func (t *targetrunner) votehdlr(w http.ResponseWriter, r *http.Request) {
 	apitems := t.restAPIItems(r.URL.Path, 5)
 	if apitems = t.checkRestAPI(w, r, apitems, 1, Rversion, Rvote); apitems == nil {
@@ -39,6 +60,7 @@ func (t *targetrunner) votehdlr(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// "/"+Rversion+"/"+Rvote+"/"
 func (p *proxyrunner) votehdlr(w http.ResponseWriter, r *http.Request) {
 	apitems := p.restAPIItems(r.URL.Path, 5)
 	if apitems = p.checkRestAPI(w, r, apitems, 1, Rversion, Rvote); apitems == nil {
@@ -78,20 +100,38 @@ func (t *targetrunner) httptargetvote(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = targetinfo
+	//FIXME: This method is not yet implemented
+	assert(false)
 
 }
 
-// GET "/"+Rversion+"/"+Rvote+"/"+Rvotepxy+"?"+ParamPrimaryCandidate+"="
+// GET "/"+Rversion+"/"+Rvote+"/"+Rvotepxy
 func (h *httprunner) httpproxyvote(w http.ResponseWriter, r *http.Request) {
 	apitems := h.restAPIItems(r.URL.Path, 5)
 	if apitems = h.checkRestAPI(w, r, apitems, 1, Rversion, Rvote); apitems == nil {
 		return
 	}
 
-	query := r.URL.Query()
-	candidate := query.Get(URLParamPrimaryCandidate)
+	msg := VoteMessage{}
+	err := h.readJSON(w, r, &msg)
+	if err != nil {
+		s := fmt.Sprintf("Error reading Vote Request body: %v", err)
+		h.invalmsghdlr(w, r, s)
+		return
+	}
+
+	v := h.smap.version()
+	if v != msg.SmapVersion {
+		// Invalid vote, return No
+		//FIXME: Is that correct?
+		fmt.Printf("Invalid Smap version in VoteMessage: %v, should be %v\n", msg.SmapVersion, v)
+		w.Write([]byte(VoteNo))
+		return
+	}
+
+	candidate := msg.Candidate
 	if candidate == "" {
-		s := fmt.Sprintf("Cannot request vote without %s query parameter.", URLParamPrimaryCandidate)
+		s := fmt.Sprintln("Cannot request vote without Candidate field")
 		h.invalmsghdlr(w, r, s)
 		return
 	}
@@ -152,6 +192,12 @@ func (p *proxyrunner) httpRequestNewPrimary(w http.ResponseWriter, r *http.Reque
 	go p.ProxyElection()
 }
 
+//===================
+//
+// Election Functions
+//
+//===================
+
 func (p *proxyrunner) ProxyElection() error {
 	// First, ping current proxy with a short timeout: (Primary? State)
 
@@ -176,7 +222,8 @@ func (p *proxyrunner) ProxyElection() error {
 	}
 
 	fmt.Printf("%v: Primary Proxy %v is down, removing from Smap\n", p.si.DaemonID, p.proxysi.DaemonID)
-	p.smap.delProxy(p.proxysi.DaemonID)
+	delete(p.smap.Pmap, p.proxysi.DaemonID)
+	// FIXME: This Deletion from Smap
 
 	fmt.Println("Moving to Election state")
 	// Begin Election State
@@ -291,7 +338,22 @@ func (p *proxyrunner) ConfirmElectionVictory() error {
 func (p *proxyrunner) RequestVote(si *daemonInfo, wg *sync.WaitGroup, resultch chan bool, errch chan error) {
 	defer wg.Done()
 	url := fmt.Sprintf("%s/%s/%s/%s?%s=%s", si.DirectURL, Rversion, Rvote, Rproxy, URLParamPrimaryCandidate, p.si.DaemonID)
-	r, err := p.httpclient.Get(url)
+
+	msg := VoteMessage{
+		Candidate:   p.si.DaemonID,
+		SmapVersion: p.smap.version(),
+	}
+	jsbytes, err := json.Marshal(&msg)
+	assert(err == nil, err)
+
+	req, err := http.NewRequest(http.MethodGet, url, bytes.NewBuffer(jsbytes))
+	if err != nil {
+		e := fmt.Errorf("Unexpected failure to create http request %s %s, err: %v", http.MethodGet, url, err)
+		errch <- e
+		return
+	}
+
+	r, err := p.httpclient.Do(req)
 	if err != nil {
 		e := fmt.Errorf("Error requesting vote from %s(%s): %v", si.DaemonID, si.DirectURL, err)
 		errch <- e
@@ -316,7 +378,7 @@ func (p *proxyrunner) RequestVote(si *daemonInfo, wg *sync.WaitGroup, resultch c
 func (p *proxyrunner) SendNewPrimaryProxy(di *daemonInfo, wg *sync.WaitGroup, errch chan error) {
 	defer wg.Done()
 
-	url := fmt.Sprintf("%s/%s/%s/%s?%s=%s", di.DirectURL, Rversion, Rvote, Rvoteres, ParamPrimaryCandidate, p.si.DaemonID)
+	url := fmt.Sprintf("%s/%s/%s/%s?%s=%s", di.DirectURL, Rversion, Rvote, Rvoteres, URLParamPrimaryCandidate, p.si.DaemonID)
 	r, err := p.httpclient.Get(url)
 	if err != nil {
 		e := fmt.Errorf("Error requesting vote from %s(%s): %v", di.DaemonID, di.DirectURL, err)
@@ -343,6 +405,7 @@ func (p *proxyrunner) BecomePrimaryProxy() {
 	p.primary = true
 	p.smap.getProxy(p.si.DaemonID).Primary = true
 	p.smap.ProxySI = p.smap.getProxy(p.si.DaemonID)
+	p.smap.Version++
 }
 
 func (h *httprunner) onPrimaryProxyFailure() {

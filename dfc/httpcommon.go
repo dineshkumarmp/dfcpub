@@ -337,6 +337,7 @@ func (h *httprunner) writeJSON(w http.ResponseWriter, r *http.Request, jsbytes [
 		return
 	}
 	errstr := fmt.Sprintf("%s: Failed to write json, err: %v", tag, err)
+
 	h.invalmsghdlr(w, r, errstr)
 	return
 }
