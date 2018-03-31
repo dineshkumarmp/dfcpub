@@ -109,7 +109,9 @@ func (p *proxyrunner) run() error {
 
 	p.smap.ProxySI = &proxyInfo{daemonInfo: *p.si, Primary: p.primary}
 	// startup: sync local buckets and cluster map when the latter stabilizes
-	go p.synchronizeMaps(clivars.ntargets, "")
+	if p.primary {
+		go p.synchronizeMaps(clivars.ntargets, "")
+	}
 
 	//
 	// REST API: register proxy handlers and start listening
@@ -669,6 +671,11 @@ func (p *proxyrunner) httphealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *proxyrunner) deleteLocalBucket(w http.ResponseWriter, r *http.Request, lbucket string) {
+	if !p.primary {
+		s := fmt.Sprintf("Cannot delete local bucket from non-primary proxy %v", p.si.DaemonID)
+		p.invalmsghdlr(w, r, s)
+		return
+	}
 	if !p.islocalBucket(lbucket) {
 		p.invalmsghdlr(w, r, "Cannot delete non-local bucket %s", lbucket)
 		return
@@ -702,6 +709,11 @@ func (p *proxyrunner) httpfilpost(w http.ResponseWriter, r *http.Request) {
 	}
 	switch msg.Action {
 	case ActCreateLB:
+		if !p.primary {
+			s := fmt.Sprintf("Cannot create LB from non-primary proxy %v", p.si.DaemonID)
+			p.invalmsghdlr(w, r, s)
+			return
+		}
 		p.lbmap.lock()
 		defer p.lbmap.unlock()
 		if !p.lbmap.add(lbucket) {
@@ -711,6 +723,11 @@ func (p *proxyrunner) httpfilpost(w http.ResponseWriter, r *http.Request) {
 		}
 		p.synclbmap(w, r)
 	case ActSyncLB:
+		if !p.primary {
+			s := fmt.Sprintf("Cannot synchronize LBmap from non-primary proxy %v", p.si.DaemonID)
+			p.invalmsghdlr(w, r, s)
+			return
+		}
 		p.lbmap.lock()
 		defer p.lbmap.unlock()
 		p.synclbmap(w, r)
@@ -1027,6 +1044,13 @@ func (p *proxyrunner) httpclupost(w http.ResponseWriter, r *http.Request) {
 		keepalive bool
 		proxy     bool
 	)
+
+	if !p.primary {
+		s := fmt.Sprintf("Cannot register from a non-primary proxy %v", p.si.DaemonID)
+		p.invalmsghdlr(w, r, s)
+		return
+	}
+
 	apitems := p.restAPIItems(r.URL.Path, 5)
 	if apitems = p.checkRestAPI(w, r, apitems, 0, Rversion, Rcluster); apitems == nil {
 		return
@@ -1123,6 +1147,11 @@ func (p *proxyrunner) registertarget(nsi daemonInfo, keepalive bool) {
 
 // unregisters a target
 func (p *proxyrunner) httpcludel(w http.ResponseWriter, r *http.Request) {
+	if !p.primary {
+		s := fmt.Sprintf("Cannot unregister from a non-primary proxy %v", p.si.DaemonID)
+		p.invalmsghdlr(w, r, s)
+		return
+	}
 	apitems := p.restAPIItems(r.URL.Path, 6)
 	if apitems = p.checkRestAPI(w, r, apitems, 2, Rversion, Rcluster); apitems == nil {
 		return
@@ -1211,6 +1240,11 @@ func (p *proxyrunner) httpcluput(w http.ResponseWriter, r *http.Request) {
 	case ActSyncSmap:
 		fallthrough
 	case ActRebalance:
+		if !p.primary {
+			s := fmt.Sprintf("Cannot initiate rebalance from a non-primary proxy %v", p.si.DaemonID)
+			p.invalmsghdlr(w, r, s)
+			return
+		}
 		go p.synchronizeMaps(0, msg.Action)
 
 	default:
@@ -1226,6 +1260,10 @@ func (p *proxyrunner) httpcluput(w http.ResponseWriter, r *http.Request) {
 //========================
 // TODO: proxy.stop() must terminate this routine
 func (p *proxyrunner) synchronizeMaps(ntargets int, action string) {
+	if !p.primary {
+		glog.Errorf("Only the primary proxy should call SynchronizeMaps.")
+		return
+	}
 	aval := time.Now().Unix()
 	startingUp := ntargets > 0
 
