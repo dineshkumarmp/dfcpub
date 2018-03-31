@@ -32,7 +32,7 @@ func hrwTarget(name string, smap *Smap) (si *daemonInfo, errstr string) {
 	return
 }
 
-func hrwProxy(smap *Smap) (pi *proxyInfo, errstr string) {
+func hrwProxy(smap *Smap, idToSkip string) (pi *proxyInfo, errstr string) {
 	smap.Lock()
 	defer smap.Unlock()
 	if smap.countProxies() == 0 {
@@ -41,6 +41,9 @@ func hrwProxy(smap *Smap) (pi *proxyInfo, errstr string) {
 	}
 	var max uint64
 	for id, sinfo := range smap.Pmap {
+		if id == idToSkip {
+			continue
+		}
 		cs := xxhash.ChecksumString64S(id, mLCG32)
 		if cs > max {
 			max = cs
