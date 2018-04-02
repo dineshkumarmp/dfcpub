@@ -144,7 +144,6 @@ func (p *proxyrunner) register(timeout time.Duration) (status int, err error) {
 	}
 	url += "/" + Rversion + "/" + Rcluster + "/" + Rproxy
 	if timeout > 0 {
-		//FIXME keepalive w/ proxy
 		url += "/" + Rkeepalive
 		_, err, _, status = p.call(nil, url, http.MethodPost, jsbytes, timeout)
 	} else {
@@ -948,7 +947,6 @@ func (p *proxyrunner) httpdaeput(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *proxyrunner) httpdaeputSmap(w http.ResponseWriter, r *http.Request, apitems []string) {
-	//FIXME: Move to httpcommon?
 	curversion := p.smap.Version
 	var newsmap *Smap
 	if p.readJSON(w, r, &newsmap) != nil {
@@ -1164,7 +1162,7 @@ func (p *proxyrunner) httpcludel(w http.ResponseWriter, r *http.Request) {
 	sid := apitems[1]
 	proxy := false
 	if sid == Rproxy {
-		proxy = true // FIXME: Better way of doing this?
+		proxy = true
 		sid = apitems[2]
 	}
 	p.smap.lock()
@@ -1189,7 +1187,11 @@ func (p *proxyrunner) httpcludel(w http.ResponseWriter, r *http.Request) {
 	// TODO: startup -- leave --
 	//
 	if glog.V(3) {
-		glog.Infof("Unregistered target {%s} (count %d)", sid, p.smap.count())
+		if proxy {
+			glog.Infof("Unregistered proxy {%s} (count %d)", sid, p.smap.countProxies())
+		} else {
+			glog.Infof("Unregistered target {%s} (count %d)", sid, p.smap.count())
+		}
 	}
 	go p.synchronizeMaps(0, "")
 }

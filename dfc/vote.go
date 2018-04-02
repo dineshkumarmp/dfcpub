@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -59,11 +60,14 @@ func (t *targetrunner) votehdlr(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch apitems[0] {
-	case Rproxy:
+	switch r.Method {
+	case http.MethodGet:
 		t.httpproxyvote(w, r)
-	case Rvoteres:
+	case http.MethodPut:
 		t.httpsetprimaryproxy(w, r)
+	default:
+		s := fmt.Sprintf("Invalid HTTP Method: %v %s", r.Method, r.URL.Path)
+		t.invalmsghdlr(w, r, s)
 	}
 }
 
@@ -74,13 +78,21 @@ func (p *proxyrunner) votehdlr(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch apitems[0] {
-	case Rproxy:
+	switch r.Method {
+	case http.MethodGet:
 		p.httpproxyvote(w, r)
-	case Rvoteres:
-		p.httpsetprimaryproxy(w, r)
-	case Rvoteinit:
-		p.httpRequestNewPrimary(w, r)
+	case http.MethodPut:
+		if apitems[0] == Rvoteres {
+			p.httpsetprimaryproxy(w, r)
+			return
+		} else if apitems[0] == Rvoteinit {
+			p.httpRequestNewPrimary(w, r)
+			return
+		}
+		fallthrough
+	default:
+		s := fmt.Sprintf("Invalid HTTP Method: %v %s", r.Method, r.URL.Path)
+		p.invalmsghdlr(w, r, s)
 	}
 }
 
@@ -124,35 +136,7 @@ func (h *httprunner) httpproxyvote(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *httprunner) VoteOnProxy(candidate string) (bool, error) {
-	proxyinfo, ok := h.GetProxyLocked(candidate)
-	if !ok {
-		return false, fmt.Errorf("Candidate not present in proxy smap: %s (%v)", candidate, h.smap.Pmap)
-	}
-
-	// First: Check last keepalive timestamp. If the proxy was recently successfully reached,
-	// this will always vote no, as we believe the original proxy is still alive.
-	lastKeepaliveTime := h.kalive.getTimestamp(h.proxysi.DaemonID)
-	timeSinceLastKalive := time.Since(lastKeepaliveTime)
-	if timeSinceLastKalive < ctx.config.KeepAliveTime/2 {
-		// KeepAliveTime/2 is the expected amount time since the last keepalive was sent
-		return false, nil
-	}
-
-	//FIXME: Currently, the above timestamp only applies to outgoing communications.
-	// It should also update the timestamp when recieving communication from the proxy.
-
-	// Second: Vote according to whether or not the candidate is the Highest Random Weight remaining
-	// in the Smap
-	hrwmax, errstr := hrwProxy(h.smap, h.proxysi.DaemonID)
-	if errstr != "" {
-		return false, fmt.Errorf("Error executing HRW: %v", errstr)
-	}
-
-	return hrwmax.DaemonID == proxyinfo.DaemonID, nil
-}
-
-// GET "/"+Rversion+"/"+Rvote+"/"+Rvoteres
+// PUT "/"+Rversion+"/"+Rvote+"/"+Rvoteres
 func (h *httprunner) httpsetprimaryproxy(w http.ResponseWriter, r *http.Request) {
 	apitems := h.restAPIItems(r.URL.Path, 5)
 	if apitems = h.checkRestAPI(w, r, apitems, 1, Rversion, Rvote); apitems == nil {
@@ -185,6 +169,12 @@ func (h *httprunner) httpsetprimaryproxy(w http.ResponseWriter, r *http.Request)
 	h.proxysi = proxyinfo
 	h.smap.delProxy(vr.Primary)
 	h.smap.ProxySI = proxyinfo
+	ctx.config.Proxy.ID = proxyinfo.DaemonID
+	ctx.config.Proxy.URL = proxyinfo.DirectURL
+	err = h.writeConfigFile()
+	if err != nil {
+		glog.Errorf("Error writinc config file: %v", err)
+	}
 }
 
 // PUT "/"+Rversion+"/"+Rvote+"/"+Rvoteinit
@@ -291,7 +281,7 @@ func (p *proxyrunner) PingWithTimeout(url string, timeout time.Duration) (bool, 
 }
 
 func (p *proxyrunner) ElectAmongProxies(vr VoteRecord) (winner bool, err error) {
-	// Currently: Simple Majority
+	// Simple Majority Vote
 	wg := &sync.WaitGroup{}
 	chansize := p.smap.count() + p.smap.countProxies() - 1
 	resch := make(chan bool, chansize)
@@ -386,7 +376,7 @@ func (p *proxyrunner) RequestVote(vr VoteRecord, si *daemonInfo, wg *sync.WaitGr
 		errch <- e
 		return
 	}
-	//TODO proper json structure?
+
 	resultch <- (VoteYes == Vote(respbytes))
 }
 
@@ -398,7 +388,7 @@ func (p *proxyrunner) SendNewPrimaryProxy(vr VoteRecord, di *daemonInfo, wg *syn
 	assert(err == nil, err)
 
 	url := fmt.Sprintf("%s/%s/%s/%s", di.DirectURL, Rversion, Rvote, Rvoteres)
-	req, err := http.NewRequest(http.MethodGet, url, bytes.NewBuffer(jsbytes))
+	req, err := http.NewRequest(http.MethodPut, url, bytes.NewBuffer(jsbytes))
 	if err != nil {
 		e := fmt.Errorf("Unexpected failure to create http request %s %s, err: %v", http.MethodGet, url, err)
 		errch <- e
@@ -434,7 +424,12 @@ func (p *proxyrunner) BecomePrimaryProxy(vr VoteRecord) {
 	psi.Primary = true
 	p.proxysi = psi
 	p.smap.ProxySI = psi
-
+	ctx.config.Proxy.ID = psi.DaemonID
+	ctx.config.Proxy.URL = psi.DirectURL
+	err := p.writeConfigFile()
+	if err != nil {
+		glog.Errorf("Error writinc config file: %v", err)
+	}
 	go p.synchronizeMaps(0, "")
 }
 
@@ -512,14 +507,56 @@ func (h *httprunner) sendElectionRequest(vr VoteRecord, nextPrimaryProxy *proxyI
 	}
 }
 
+func (h *httprunner) VoteOnProxy(candidate string) (bool, error) {
+	proxyinfo, ok := h.GetProxyLocked(candidate)
+	if !ok {
+		return false, fmt.Errorf("Candidate not present in proxy smap: %s (%v)", candidate, h.smap.Pmap)
+	}
+
+	// First: Check last keepalive timestamp. If the proxy was recently successfully reached,
+	// this will always vote no, as we believe the original proxy is still alive.
+	lastKeepaliveTime := h.kalive.getTimestamp(h.proxysi.DaemonID)
+	timeSinceLastKalive := time.Since(lastKeepaliveTime)
+	if timeSinceLastKalive < ctx.config.KeepAliveTime/2 {
+		// KeepAliveTime/2 is the expected amount time since the last keepalive was sent
+		return false, nil
+	}
+
+	//FIXME: Currently, the above timestamp only applies to outgoing communications.
+	// It should also update the timestamp when recieving communication from the proxy.
+
+	// Second: Vote according to whether or not the candidate is the Highest Random Weight remaining
+	// in the Smap
+	hrwmax, errstr := hrwProxy(h.smap, h.proxysi.DaemonID)
+	if errstr != "" {
+		return false, fmt.Errorf("Error executing HRW: %v", errstr)
+	}
+
+	return hrwmax.DaemonID == proxyinfo.DaemonID, nil
+}
+
 //==================
 //
 // Helper Functions
 //
 //==================
+
 func (h *httprunner) GetProxyLocked(candidate string) (*proxyInfo, bool) {
 	h.smap.lock()
 	defer h.smap.unlock()
 	proxyinfo := h.smap.getProxy(candidate)
 	return proxyinfo, (proxyinfo != nil)
+}
+
+func (h *httprunner) writeConfigFile() error {
+	jsbytes, err := json.Marshal(ctx.config)
+	assert(err == nil)
+
+	conffile := clivars.conffile
+	if err := ioutil.WriteFile(conffile, jsbytes, os.ModePerm); err != nil {
+		return fmt.Errorf("Error writing Config File: %v", err)
+	}
+
+	return nil
+
 }
