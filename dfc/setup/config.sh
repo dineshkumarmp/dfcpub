@@ -12,6 +12,7 @@
 		"long_timeout":		"30m"
 	},
 	"keep_alive_time":		"20s",
+	"keep_alive_max_fails":		3,
 	"h2c": 				false,
 	"listen": {
 		"proto": 		"tcp",

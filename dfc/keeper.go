@@ -22,7 +22,8 @@ const (
 
 type kaliveif interface {
 	onerr(err error, status int)
-	timestamp(directurl string)
+	timestamp(sid string)
+	getTimestamp(sid string) time.Time
 	keepalive(err error) (stopped bool)
 }
 
@@ -77,8 +78,14 @@ func (r *kalive) onerr(err error, status int) {
 
 func (r *kalive) timestamp(sid string) {
 	r.okmap.Lock()
+	defer r.okmap.Unlock()
 	r.okmap.okmap[sid] = time.Now()
-	r.okmap.Unlock()
+}
+
+func (r *kalive) getTimestamp(sid string) time.Time {
+	r.okmap.Lock()
+	defer r.okmap.Unlock()
+	return r.okmap.okmap[sid]
 }
 
 func (r *kalive) skipCheck(sid string) bool {
@@ -165,11 +172,11 @@ func keepalive(r Registerer, chstop chan struct{}, err error) (stopped bool) {
 				glog.Infof("Warning: keepalive failed, err: %v", err)
 			}
 			failstreak++
-			if failstreak > 3 {
+			if failstreak > ctx.config.KeepAliveMaxFails || IsErrConnectionRefused(err) {
 				stopped = true
 				return
 			}
-			if IsErrConnectionRefused(err) || status == http.StatusRequestTimeout {
+			if status == http.StatusRequestTimeout {
 				continue
 			}
 			glog.Warningf("keepalive: Unexpected status %d, err: %v", status, err)

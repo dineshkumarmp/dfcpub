@@ -45,30 +45,31 @@ const lbname = "localbuckets"
 //
 //==============================
 type dfconfig struct {
-	Logdir           string            `json:"logdir"`
-	Confdir          string            `json:"confdir"`
-	Loglevel         string            `json:"loglevel"`
-	CloudProvider    string            `json:"cloudprovider"`
-	CloudBuckets     string            `json:"cloud_buckets"`
-	LocalBuckets     string            `json:"local_buckets"`
-	StatsTimeStr     string            `json:"stats_time"`
-	StatsTime        time.Duration     `json:"-"` // omitempty
-	HTTP             httpconfig        `json:"http"`
-	KeepAliveTimeStr string            `json:"keep_alive_time"`
-	KeepAliveTime    time.Duration     `json:"-"` // omitempty
-	H2c              bool              `json:"h2c"`
-	Listen           listenconfig      `json:"listen"`
-	Proxy            proxyconfig       `json:"proxy"`
-	S3               s3config          `json:"s3"`
-	LRUConfig        lruconfig         `json:"lru_config"`
-	RebalanceConf    rebalanceconf     `json:"rebalance_conf"`
-	CksumConfig      cksumconfig       `json:"cksum_config"`
-	VersionConfig    versionconfig     `json:"version_config"`
-	FSpaths          map[string]string `json:"fspaths"`
-	TestFSP          testfspathconf    `json:"test_fspaths"`
-	AckPolicy        ackpolicy         `json:"ack_policy"`
-	Network          netconfig         `json:"network"`
-	DiskKeeper       diskkeeperconf    `json:"diskkeeper"`
+	Logdir            string            `json:"logdir"`
+	Confdir           string            `json:"confdir"`
+	Loglevel          string            `json:"loglevel"`
+	CloudProvider     string            `json:"cloudprovider"`
+	CloudBuckets      string            `json:"cloud_buckets"`
+	LocalBuckets      string            `json:"local_buckets"`
+	StatsTimeStr      string            `json:"stats_time"`
+	StatsTime         time.Duration     `json:"-"` // omitempty
+	HTTP              httpconfig        `json:"http"`
+	KeepAliveTimeStr  string            `json:"keep_alive_time"`
+	KeepAliveTime     time.Duration     `json:"-"` // omitempty
+	KeepAliveMaxFails int               `json:"keep_alive_max_fails"`
+	H2c               bool              `json:"h2c"`
+	Listen            listenconfig      `json:"listen"`
+	Proxy             proxyconfig       `json:"proxy"`
+	S3                s3config          `json:"s3"`
+	LRUConfig         lruconfig         `json:"lru_config"`
+	RebalanceConf     rebalanceconf     `json:"rebalance_conf"`
+	CksumConfig       cksumconfig       `json:"cksum_config"`
+	VersionConfig     versionconfig     `json:"version_config"`
+	FSpaths           map[string]string `json:"fspaths"`
+	TestFSP           testfspathconf    `json:"test_fspaths"`
+	AckPolicy         ackpolicy         `json:"ack_policy"`
+	Network           netconfig         `json:"network"`
+	DiskKeeper        diskkeeperconf    `json:"diskkeeper"`
 }
 
 type s3config struct {

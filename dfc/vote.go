@@ -112,27 +112,44 @@ func (h *httprunner) httpproxyvote(w http.ResponseWriter, r *http.Request) {
 		h.invalmsghdlr(w, r, s)
 		return
 	}
-
-	proxyinfo, ok := h.GetProxyLocked(candidate)
-	if !ok {
-		s := fmt.Sprintf("Candidate not present in proxy smap: %s (%v)", candidate, h.smap.Pmap)
-		h.invalmsghdlr(w, r, s)
-		return
+	vote, err := h.VoteOnProxy(candidate)
+	if err != nil {
+		h.invalmsghdlr(w, r, err.Error())
 	}
 
-	hrwmax, errstr := hrwProxy(h.smap, h.proxysi.DaemonID)
-	if errstr != "" {
-		s := fmt.Sprintf("Error executing HRW: %v", errstr)
-		h.invalmsghdlr(w, r, s)
-		return
-	}
-
-	//FIXME: Timestamp discussion
-	if hrwmax.DaemonID == proxyinfo.DaemonID {
-		w.Write([]byte(VoteYes)) // FIXME: JSON Struct?
+	if vote {
+		w.Write([]byte(VoteYes))
 	} else {
 		w.Write([]byte(VoteNo))
 	}
+}
+
+func (h *httprunner) VoteOnProxy(candidate string) (bool, error) {
+	proxyinfo, ok := h.GetProxyLocked(candidate)
+	if !ok {
+		return false, fmt.Errorf("Candidate not present in proxy smap: %s (%v)", candidate, h.smap.Pmap)
+	}
+
+	// First: Check last keepalive timestamp. If the proxy was recently successfully reached,
+	// this will always vote no, as we believe the original proxy is still alive.
+	lastKeepaliveTime := h.kalive.getTimestamp(h.proxysi.DaemonID)
+	timeSinceLastKalive := time.Since(lastKeepaliveTime)
+	if timeSinceLastKalive < ctx.config.KeepAliveTime/2 {
+		// KeepAliveTime/2 is the expected amount time since the last keepalive was sent
+		return false, nil
+	}
+
+	//FIXME: Currently, the above timestamp only applies to outgoing communications.
+	// It should also update the timestamp when recieving communication from the proxy.
+
+	// Second: Vote according to whether or not the candidate is the Highest Random Weight remaining
+	// in the Smap
+	hrwmax, errstr := hrwProxy(h.smap, h.proxysi.DaemonID)
+	if errstr != "" {
+		return false, fmt.Errorf("Error executing HRW: %v", errstr)
+	}
+
+	return hrwmax.DaemonID == proxyinfo.DaemonID, nil
 }
 
 // GET "/"+Rversion+"/"+Rvote+"/"+Rvoteres
@@ -219,9 +236,7 @@ func (p *proxyrunner) ProxyElection(vr VoteRecord) error {
 	// First, ping current proxy with a short timeout: (Primary? State)
 	url := ctx.config.Proxy.URL + "/" + Rversion + "/" + Rhealth
 	proxyup, err := p.PingWithTimeout(url, ProxyPingTimeout)
-	if err != nil {
-		proxyup = false
-	}
+
 	if proxyup {
 		// Move back to Idle state
 		fmt.Println("Moving back to Idle state")
@@ -267,12 +282,11 @@ func (p *proxyrunner) PingWithTimeout(url string, timeout time.Duration) (bool, 
 		return true, nil
 	}
 
-	if err == context.DeadlineExceeded {
+	if err == context.DeadlineExceeded || IsErrConnectionRefused(err) {
 		// Then the proxy is unreachable
 		return false, nil
 	}
 
-	// The proxy may/may not be down, because we encountered a non-timeout error.
 	return false, err
 }
 
