@@ -21,6 +21,9 @@ const (
 	VoteNo  Vote = "NO"
 )
 
+// xaction constant for Election
+const ActElection = "election"
+
 const (
 	ProxyPingTimeout = 100 * time.Millisecond
 )
@@ -192,9 +195,19 @@ func (p *proxyrunner) httpRequestNewPrimary(w http.ResponseWriter, r *http.Reque
 //===================
 
 func (p *proxyrunner) ProxyElection(vr VoteRecord) error {
-	// First, ping current proxy with a short timeout: (Primary? State)
 
-	// FIXME: Different Lock? Finer-grained synchronization?
+	xele := p.xactinp.renewElection(p, vr)
+	if xele == nil {
+		fmt.Println("An election is already in progress, returning.")
+		return nil
+	}
+
+	defer func() {
+		xele.etime = time.Now()
+		glog.Infoln(xele.tostring())
+		p.xactinp.del(xele.id)
+	}()
+
 	p.smap.lock()
 	defer p.smap.unlock()
 
@@ -203,6 +216,7 @@ func (p *proxyrunner) ProxyElection(vr VoteRecord) error {
 		return nil
 	}
 
+	// First, ping current proxy with a short timeout: (Primary? State)
 	url := ctx.config.Proxy.URL + "/" + Rversion + "/" + Rhealth
 	proxyup, err := p.PingWithTimeout(url, ProxyPingTimeout)
 	if err != nil {
