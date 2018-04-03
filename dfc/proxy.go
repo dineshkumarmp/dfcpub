@@ -13,12 +13,14 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/NVIDIA/dfcpub/dfc/statsd"
 	"github.com/golang/glog"
 )
 
@@ -55,6 +57,7 @@ type proxyrunner struct {
 	xactinp     *xactInProgress
 	lbmap       *lbmap
 	syncmapinp  int64
+	statsdC     statsd.Client
 }
 
 // start proxy runner
@@ -93,6 +96,18 @@ func (p *proxyrunner) run() error {
 	glog.Flush()
 	p.starttime = time.Now()
 
+	var host string
+	host, err := os.Hostname()
+	if err != nil {
+		glog.Info("Failed to get host name", err)
+		host = p.si.DaemonID
+	}
+
+	p.statsdC, err = statsd.New("localhost", 8125, fmt.Sprintf("dfcproxy.%s", host)) // FIXME: hardcoding port number for now
+	if err != nil {
+		glog.Info("Failed to connect to statd, running without statsd")
+	}
+
 	return p.httprunner.run()
 }
 
@@ -114,6 +129,8 @@ func (p *proxyrunner) stop(err error) {
 		}
 		break
 	}
+
+	p.statsdC.Close()
 	p.httprunner.stop(err)
 }
 
@@ -144,6 +161,8 @@ func (p *proxyrunner) filehdlr(w http.ResponseWriter, r *http.Request) {
 
 // e.g.: GET /v1/files/bucket/object
 func (p *proxyrunner) httpfilget(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
 	if ctx.smap.count() < 1 {
 		p.invalmsghdlr(w, r, "No registered targets yet")
 		return
@@ -176,13 +195,21 @@ func (p *proxyrunner) httpfilget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	redirecturl := fmt.Sprintf("%s%s?%s=%t", si.DirectURL, r.URL.Path, URLParamLocal, p.islocalBucket(bucket))
-	if glog.V(3) {
-		glog.Infof("Redirecting %q to %s (%s)", r.URL.Path, si.DirectURL, r.Method)
-	}
+	// if glog.V(3) {
+	// glog.Infof("Redirecting %q to %s (%s)", r.URL.Path, si.DirectURL, r.Method)
+	//}
 	if !ctx.config.Proxy.Passthru && len(objname) > 0 {
 		glog.Infof("passthru=false: proxy initiates the GET %s/%s", bucket, objname)
 		p.receiveDrop(w, r, redirecturl) // ignore error, proceed to http redirect
 	}
+
+	p.statsdC.Send("get",
+		statsd.Metric{
+			Type:  statsd.Timer,
+			Name:  "latency",
+			Value: float64(time.Now().Sub(start) / time.Millisecond),
+		},
+	)
 	http.Redirect(w, r, redirecturl, http.StatusMovedPermanently)
 }
 

@@ -7,24 +7,26 @@ import (
 	"time"
 )
 
-// Stats records accumulated puts/gets information.
-type Stats struct {
-	start      time.Time     // time current stats started
-	puts       int64         // total puts
-	putBytes   int64         // total bytes by all puts
-	errPuts    int64         // number of failed puts
-	putLatency time.Duration // Accumulated put latency
-	gets       int64         // total gets
-	getBytes   int64         // total bytes by all gets
-	errGets    int64         // number of failed gets
-	getLatency time.Duration // Accumulated get latency
+type (
+	stats struct {
+		cnt     int64         // total # of requests
+		bytes   int64         // total bytes by all requests
+		errs    int64         // number of failed requests
+		latency time.Duration // Accumulated request latency
 
-	// self maintained fields
-	minPutLatency time.Duration
-	maxPutLatency time.Duration
-	minGetLatency time.Duration
-	maxGetLatency time.Duration
-}
+		// self maintained fields
+		minLatency time.Duration
+		maxLatency time.Duration
+	}
+
+	// Stats records accumulated puts/gets information.
+	Stats struct {
+		Start     time.Time // time current stats started
+		Put       stats
+		Get       stats
+		GetConfig stats
+	}
+)
 
 func minDuration(a, b time.Duration) time.Duration {
 	if a < b {
@@ -45,9 +47,9 @@ func maxDuration(a, b time.Duration) time.Duration {
 // NewStats returns a new stats object with given time as the starting point
 func NewStats(t time.Time) Stats {
 	return Stats{
-		start:         t,
-		minPutLatency: time.Duration(math.MaxInt64),
-		minGetLatency: time.Duration(math.MaxInt64),
+		Start: t,
+		Put:   stats{minLatency: time.Duration(math.MaxInt64)},
+		Get:   stats{minLatency: time.Duration(math.MaxInt64)},
 	}
 }
 
@@ -56,142 +58,81 @@ func NewStatsNow() Stats {
 	return NewStats(time.Now())
 }
 
-// AddPut adds a put to the stats
-func (s *Stats) AddPut(size int64, delta time.Duration) {
-	s.puts++
-	s.putBytes += size
-	s.putLatency += delta
-	s.minPutLatency = minDuration(s.minPutLatency, delta)
-	s.maxPutLatency = maxDuration(s.maxPutLatency, delta)
+// Add adds a request's result to the stats
+func (s *stats) Add(size int64, delta time.Duration) {
+	s.cnt++
+	s.bytes += size
+	s.latency += delta
+	s.minLatency = minDuration(s.minLatency, delta)
+	s.maxLatency = maxDuration(s.maxLatency, delta)
 }
 
-// AddErrPut increases the number of failed put count by 1
-func (s *Stats) AddErrPut() {
-	s.errPuts++
+// AddErr increases the number of failed count by 1
+func (s *stats) AddErr() {
+	s.errs++
 }
 
-// TotalPuts returns the total number of puts.
-func (s *Stats) TotalPuts() int64 {
-	return s.puts
+// Total returns the total number of requests.
+func (s *stats) Total() int64 {
+	return s.cnt
 }
 
-// TotalPutBytes returns the total number of bytes by all puts.
-func (s *Stats) TotalPutBytes() int64 {
-	return s.putBytes
+// TotalBytes returns the total number of bytes by all requests.
+func (s *stats) TotalBytes() int64 {
+	return s.bytes
 }
 
-// MinPutLatency returns the minimal put latency in nano second.
-func (s *Stats) MinPutLatency() int64 {
-	if s.puts == 0 {
+// MinLatency returns the minimal latency in nano second.
+func (s *stats) MinLatency() int64 {
+	if s.cnt == 0 {
 		return 0
 	}
-	return int64(s.minPutLatency)
+	return int64(s.minLatency)
 }
 
-// MaxPutLatency returns the maximal put latency in nano second.
-func (s *Stats) MaxPutLatency() int64 {
-	if s.puts == 0 {
+// MaxLatency returns the maximal latency in nano second.
+func (s *stats) MaxLatency() int64 {
+	if s.cnt == 0 {
 		return 0
 	}
-	return int64(s.maxPutLatency)
+	return int64(s.maxLatency)
 }
 
-// AvgPutLatency returns the avg put latency in nano second.
-func (s *Stats) AvgPutLatency() int64 {
-	if s.puts == 0 {
+// AvgLatency returns the avg latency in nano second.
+func (s *stats) AvgLatency() int64 {
+	if s.cnt == 0 {
 		return 0
 	}
-	return int64(s.putLatency) / s.puts
+	return int64(s.latency) / s.cnt
 }
 
-// PutThroughput returns throughput of puts (put bytes/per second).
-func (s *Stats) PutThroughput(t time.Time) int64 {
-	if s.start == t {
+// Throughput returns throughput of requests (bytes/per second).
+func (s *stats) Throughput(start, end time.Time) int64 {
+	if start == end {
 		return 0
 	}
-	return int64(float64(s.putBytes) / t.Sub(s.start).Seconds())
+	return int64(float64(s.bytes) / end.Sub(start).Seconds())
 }
 
-// TotalErrPuts returns the total number of failed puts.
-func (s *Stats) TotalErrPuts() int64 {
-	return s.errPuts
+// TotalErrs returns the total number of failed requests.
+func (s *stats) TotalErrs() int64 {
+	return s.errs
 }
 
-// AddGet adds a get to the stats
-func (s *Stats) AddGet(size int64, delta time.Duration) {
-	s.gets++
-	s.getBytes += size
-	s.getLatency += delta
-	s.minGetLatency = minDuration(s.minGetLatency, delta)
-	s.maxGetLatency = maxDuration(s.maxGetLatency, delta)
-}
+// Aggregate adds another stats to self
+func (s *stats) Aggregate(other stats) {
+	s.cnt += other.cnt
+	s.bytes += other.bytes
+	s.errs += other.errs
+	s.latency += other.latency
 
-// AddErrGet increases the number of failed get count by 1
-func (s *Stats) AddErrGet() {
-	s.errGets++
-}
-
-// TotalGets returns the total number of gets.
-func (s *Stats) TotalGets() int64 {
-	return s.gets
-}
-
-// TotalGetBytes returns the total number of bytes by all gets.
-func (s *Stats) TotalGetBytes() int64 {
-	return s.getBytes
-}
-
-// MinGetLatency returns the min get latency in nano second.
-func (s *Stats) MinGetLatency() int64 {
-	if s.gets == 0 {
-		return 0
-	}
-	return int64(s.minGetLatency)
-}
-
-// MaxGetLatency returns the max get latency in nano second.
-func (s *Stats) MaxGetLatency() int64 {
-	if s.gets == 0 {
-		return 0
-	}
-	return int64(s.maxGetLatency)
-}
-
-// AvgGetLatency returns the avg get latency in nano second.
-func (s *Stats) AvgGetLatency() int64 {
-	if s.gets == 0 {
-		return 0
-	}
-	return int64(s.getLatency) / s.gets
-}
-
-// GetThroughput returns throughput of gets (get bytes/per second).
-func (s *Stats) GetThroughput(t time.Time) int64 {
-	if s.start == t {
-		return 0
-	}
-	return int64(float64(s.getBytes) / t.Sub(s.start).Seconds())
-}
-
-// TotalErrGets returns the total number of failed gets.
-func (s *Stats) TotalErrGets() int64 {
-	return s.errGets
+	s.minLatency = minDuration(s.minLatency, other.minLatency)
+	s.maxLatency = maxDuration(s.maxLatency, other.maxLatency)
 }
 
 // Aggregate adds another stats to self
 func (s *Stats) Aggregate(other Stats) {
-	s.puts += other.puts
-	s.putBytes += other.putBytes
-	s.errPuts += other.errPuts
-	s.putLatency += other.putLatency
-
-	s.gets += other.gets
-	s.getBytes += other.getBytes
-	s.errGets += other.errGets
-	s.getLatency += other.getLatency
-
-	s.minPutLatency = minDuration(s.minPutLatency, other.minPutLatency)
-	s.maxPutLatency = maxDuration(s.maxPutLatency, other.maxPutLatency)
-	s.minGetLatency = minDuration(s.minGetLatency, other.minGetLatency)
-	s.maxGetLatency = maxDuration(s.maxGetLatency, other.maxGetLatency)
+	s.Get.Aggregate(other.Get)
+	s.Put.Aggregate(other.Put)
+	s.GetConfig.Aggregate(other.GetConfig)
 }
