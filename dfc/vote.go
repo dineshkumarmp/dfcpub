@@ -113,7 +113,7 @@ func (h *httprunner) httpproxyvote(w http.ResponseWriter, r *http.Request) {
 
 	v := h.smap.versionLocked()
 	if v != msg.Record.SmapVersion {
-		fmt.Printf("Invalid Smap version in VoteMessage: %v, should be %v\n", msg.Record.SmapVersion, v)
+		glog.Errorf("Invalid Smap version in VoteMessage: %v, should be %v\n", msg.Record.SmapVersion, v)
 		w.Write([]byte(VoteNo))
 		return
 	}
@@ -153,10 +153,10 @@ func (h *httprunner) httpsetprimaryproxy(w http.ResponseWriter, r *http.Request)
 
 	vr := msg.Record
 
-	fmt.Printf("%v recieved vote result: %v\n", h.si.DaemonID, vr)
+	glog.Infof("%v recieved vote result: %v\n", h.si.DaemonID, vr)
 
-	h.smap.Lock()
-	defer h.smap.Unlock()
+	h.smap.lock()
+	defer h.smap.unlock()
 
 	proxyinfo, ok := h.smap.Pmap[vr.Candidate]
 	if !ok {
@@ -205,7 +205,7 @@ func (p *proxyrunner) ProxyElection(vr VoteRecord) error {
 
 	xele := p.xactinp.renewElection(p, vr)
 	if xele == nil {
-		fmt.Println("An election is already in progress, returning.")
+		glog.Infoln("An election is already in progress, returning.")
 		return nil
 	}
 
@@ -215,11 +215,8 @@ func (p *proxyrunner) ProxyElection(vr VoteRecord) error {
 		p.xactinp.del(xele.id)
 	}()
 
-	p.smap.lock()
-	defer p.smap.unlock()
-
 	if p.primary {
-		fmt.Println("Already in Primary state.")
+		glog.Infoln("Already in Primary state.")
 		return nil
 	}
 
@@ -229,12 +226,12 @@ func (p *proxyrunner) ProxyElection(vr VoteRecord) error {
 
 	if proxyup {
 		// Move back to Idle state
-		fmt.Println("Moving back to Idle state")
+		glog.Infoln("Moving back to Idle state")
 		return nil
 	}
 
-	fmt.Printf("%v: Primary Proxy %v is confirmed down\n", p.si.DaemonID, p.proxysi.DaemonID)
-	fmt.Println("Moving to Election state")
+	glog.Infof("%v: Primary Proxy %v is confirmed down\n", p.si.DaemonID, p.proxysi.DaemonID)
+	glog.Infoln("Moving to Election state")
 	// Begin Election State
 	elected, err := p.ElectAmongProxies(vr)
 	if err != nil {
@@ -242,11 +239,11 @@ func (p *proxyrunner) ProxyElection(vr VoteRecord) error {
 	}
 	if !elected {
 		// Move back to Idle state
-		fmt.Println("Moving back to Idle state")
+		glog.Infoln("Moving back to Idle state")
 		return nil
 	}
 
-	fmt.Println("Moving to Election2 State")
+	glog.Infoln("Moving to Election2 State")
 
 	// Begin Election2 State
 	err = p.ConfirmElectionVictory(vr)
@@ -256,7 +253,7 @@ func (p *proxyrunner) ProxyElection(vr VoteRecord) error {
 		return fmt.Errorf("Error confirming election victory with other proxies: %v", err)
 	}
 
-	fmt.Println("Moving to Primary state")
+	glog.Infoln("Moving to Primary state")
 	// Begin Primary State
 	p.BecomePrimaryProxy(vr)
 
@@ -271,38 +268,26 @@ func (p *proxyrunner) PingWithTimeout(url string, timeout time.Duration) (bool, 
 		// There is no issue with the current Primary Proxy
 		return true, nil
 	}
-
 	if err == context.DeadlineExceeded || IsErrConnectionRefused(err) {
 		// Then the proxy is unreachable
 		return false, nil
 	}
-
 	return false, err
 }
 
 func (p *proxyrunner) ElectAmongProxies(vr VoteRecord) (winner bool, err error) {
 	// Simple Majority Vote
+
 	wg := &sync.WaitGroup{}
-	chansize := p.smap.count() + p.smap.countProxies() - 1
-	resch := make(chan bool, chansize)
-	errch := make(chan error, chansize)
-	defer close(errch)
-	for _, pi := range p.smap.Pmap {
-		if pi.DaemonID != p.si.DaemonID && pi.DaemonID != vr.Primary {
-			// Do not request a vote from this proxy, or the previous (down) primary proxy.
-			wg.Add(1)
-			go p.RequestVote(vr, &pi.daemonInfo, wg, resch, errch)
-		}
-	}
-	for _, pi := range p.smap.Smap {
-		wg.Add(1)
-		go p.RequestVote(vr, pi, wg, resch, errch)
-	}
+	resch, errch := p.RequestVotes(vr, wg)
 	wg.Wait()
 	close(resch)
+	close(errch)
 	select {
 	case err = <-errch:
-		return false, err
+		if err != nil {
+			return false, err
+		}
 	default:
 	}
 
@@ -316,14 +301,48 @@ func (p *proxyrunner) ElectAmongProxies(vr VoteRecord) (winner bool, err error) 
 	}
 
 	winner = y > n || (y+n == 0) // No Votes: Default Winner
-	fmt.Printf("Y: %v, N:%v, W: %v\n", y, n, winner)
+	glog.Infof("Y: %v, N:%v, W: %v\n", y, n, winner)
 	return
 }
 
 func (p *proxyrunner) ConfirmElectionVictory(vr VoteRecord) error {
 	wg := &sync.WaitGroup{}
-	errch := make(chan error, len(p.smap.Pmap)-1)
+	errch := p.BroadcastElectionVictory(vr, wg)
 	defer close(errch)
+	wg.Wait()
+	select {
+	case err := <-errch:
+		return err
+	default:
+	}
+	return nil
+}
+
+func (p *proxyrunner) RequestVotes(vr VoteRecord, wg *sync.WaitGroup) (chan bool, chan error) {
+	p.smap.lock()
+	defer p.smap.unlock()
+	chansize := p.smap.count() + p.smap.countProxies() - 1
+	resch := make(chan bool, chansize)
+	errch := make(chan error, chansize)
+	for _, pi := range p.smap.Pmap {
+		if pi.DaemonID != p.si.DaemonID && pi.DaemonID != vr.Primary {
+			// Do not request a vote from this proxy, or the previous (down) primary proxy.
+			wg.Add(1)
+			go p.RequestVote(vr, &pi.daemonInfo, wg, resch, errch)
+		}
+	}
+	for _, pi := range p.smap.Smap {
+		wg.Add(1)
+		go p.RequestVote(vr, pi, wg, resch, errch)
+	}
+
+	return resch, errch
+}
+
+func (p *proxyrunner) BroadcastElectionVictory(vr VoteRecord, wg *sync.WaitGroup) chan error {
+	p.smap.lock()
+	defer p.smap.unlock()
+	errch := make(chan error, p.smap.count()+p.smap.countProxies()-1)
 	for _, pi := range p.smap.Pmap {
 		if pi.DaemonID != vr.Candidate && pi.DaemonID != vr.Primary {
 			wg.Add(1)
@@ -334,13 +353,7 @@ func (p *proxyrunner) ConfirmElectionVictory(vr VoteRecord) error {
 		wg.Add(1)
 		go p.SendNewPrimaryProxy(vr, di, wg, errch)
 	}
-	wg.Wait()
-	select {
-	case err := <-errch:
-		return err
-	default:
-	}
-	return nil
+	return errch
 }
 
 func (p *proxyrunner) RequestVote(vr VoteRecord, si *daemonInfo, wg *sync.WaitGroup, resultch chan bool, errch chan error) {
@@ -418,6 +431,9 @@ func (p *proxyrunner) SendNewPrimaryProxy(vr VoteRecord, di *daemonInfo, wg *syn
 }
 
 func (p *proxyrunner) BecomePrimaryProxy(vr VoteRecord) {
+	p.smap.lock()
+	defer p.smap.unlock()
+
 	p.smap.delProxy(vr.Primary)
 	p.primary = true
 	psi := p.smap.getProxy(p.si.DaemonID)
@@ -434,7 +450,7 @@ func (p *proxyrunner) BecomePrimaryProxy(vr VoteRecord) {
 }
 
 func (p *proxyrunner) onPrimaryProxyFailure() {
-	fmt.Printf("%v: Primary Proxy (%v @ %v) Failed\n", p.si.DaemonID, p.proxysi.DaemonID, p.proxysi.DirectURL)
+	glog.Infof("%v: Primary Proxy (%v @ %v) Failed\n", p.si.DaemonID, p.proxysi.DaemonID, p.proxysi.DirectURL)
 
 	nextPrimaryProxy, errstr := hrwProxy(p.smap, p.proxysi.DaemonID)
 	if errstr != "" {
@@ -456,7 +472,7 @@ func (p *proxyrunner) onPrimaryProxyFailure() {
 }
 
 func (t *targetrunner) onPrimaryProxyFailure() {
-	fmt.Printf("%v: Primary Proxy (%v @ %v) Failed\n", t.si.DaemonID, t.proxysi.DaemonID, t.proxysi.DirectURL)
+	glog.Infof("%v: Primary Proxy (%v @ %v) Failed\n", t.si.DaemonID, t.proxysi.DaemonID, t.proxysi.DirectURL)
 
 	nextPrimaryProxy, errstr := hrwProxy(t.smap, t.proxysi.DaemonID)
 	if errstr != "" {

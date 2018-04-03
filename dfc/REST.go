@@ -44,6 +44,8 @@ const (
 	HeaderDfcChecksumType = "HeaderDfcChecksumType" // Checksum Type (xxhash, md5, none)
 	HeaderDfcChecksumVal  = "HeaderDfcChecksumVal"  // Checksum Value
 	HeaderDfcObjVersion   = "HeaderDfcObjVersion"   // Object version/generation
+	HeaderPrimaryProxyURL = "PrimaryProxyURL"       // URL of Primary Proxy
+	HeaderPrimaryProxyID  = "PrimaryProxyID"        // ID of Primary Proxy
 )
 
 // URL Query Parameter enum

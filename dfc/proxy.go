@@ -80,7 +80,7 @@ func (p *proxyrunner) run() error {
 
 	// Register proxy if it isn't the Primary proxy
 	if ctx.config.Proxy.ID != p.si.DaemonID {
-		glog.Errorf("Proxy (%s) is not primary proxy (%s), registering.", p.si.DaemonID, ctx.config.Proxy.ID)
+		glog.Infof("Proxy (%s) is not primary proxy (%s), registering.", p.si.DaemonID, ctx.config.Proxy.ID)
 		if status, err := p.register(0); err != nil {
 			glog.Errorf("Proxy %s failed to register with primary proxy, err: %v", p.si.DaemonID, err)
 			if IsErrConnectionRefused(err) || status == http.StatusRequestTimeout {
@@ -95,7 +95,7 @@ func (p *proxyrunner) run() error {
 				return err
 			}
 		}
-		glog.Errorf("Success: proxy %s joined the cluster", p.si.DaemonID)
+		glog.Infof("Success: proxy %s joined the cluster", p.si.DaemonID)
 		p.primary = false
 	} else {
 		p.smap.Smap = make(map[string]*daemonInfo, 8)
@@ -671,6 +671,9 @@ func (p *proxyrunner) httphealth(w http.ResponseWriter, r *http.Request) {
 
 func (p *proxyrunner) deleteLocalBucket(w http.ResponseWriter, r *http.Request, lbucket string) {
 	if !p.primary {
+		w.Header().Add(HeaderPrimaryProxyURL, p.proxysi.DirectURL)
+		w.Header().Add(HeaderPrimaryProxyID, p.proxysi.DaemonID)
+
 		s := fmt.Sprintf("Cannot delete local bucket from non-primary proxy %v", p.si.DaemonID)
 		p.invalmsghdlr(w, r, s)
 		return
@@ -709,6 +712,8 @@ func (p *proxyrunner) httpfilpost(w http.ResponseWriter, r *http.Request) {
 	switch msg.Action {
 	case ActCreateLB:
 		if !p.primary {
+			w.Header().Add(HeaderPrimaryProxyURL, p.proxysi.DirectURL)
+			w.Header().Add(HeaderPrimaryProxyID, p.proxysi.DaemonID)
 			s := fmt.Sprintf("Cannot create LB from non-primary proxy %v", p.si.DaemonID)
 			p.invalmsghdlr(w, r, s)
 			return
@@ -723,6 +728,8 @@ func (p *proxyrunner) httpfilpost(w http.ResponseWriter, r *http.Request) {
 		p.synclbmap(w, r)
 	case ActSyncLB:
 		if !p.primary {
+			w.Header().Add(HeaderPrimaryProxyURL, p.proxysi.DirectURL)
+			w.Header().Add(HeaderPrimaryProxyID, p.proxysi.DaemonID)
 			s := fmt.Sprintf("Cannot synchronize LBmap from non-primary proxy %v", p.si.DaemonID)
 			p.invalmsghdlr(w, r, s)
 			return
@@ -1044,6 +1051,8 @@ func (p *proxyrunner) httpclupost(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if !p.primary {
+		w.Header().Add(HeaderPrimaryProxyURL, p.proxysi.DirectURL)
+		w.Header().Add(HeaderPrimaryProxyID, p.proxysi.DaemonID)
 		s := fmt.Sprintf("Cannot register from a non-primary proxy %v", p.si.DaemonID)
 		p.invalmsghdlr(w, r, s)
 		return
@@ -1146,6 +1155,8 @@ func (p *proxyrunner) registertarget(nsi daemonInfo, keepalive bool) {
 // unregisters a target
 func (p *proxyrunner) httpcludel(w http.ResponseWriter, r *http.Request) {
 	if !p.primary {
+		w.Header().Add(HeaderPrimaryProxyURL, p.proxysi.DirectURL)
+		w.Header().Add(HeaderPrimaryProxyID, p.proxysi.DaemonID)
 		s := fmt.Sprintf("Cannot unregister from a non-primary proxy %v", p.si.DaemonID)
 		p.invalmsghdlr(w, r, s)
 		return
@@ -1243,6 +1254,8 @@ func (p *proxyrunner) httpcluput(w http.ResponseWriter, r *http.Request) {
 		fallthrough
 	case ActRebalance:
 		if !p.primary {
+			w.Header().Add(HeaderPrimaryProxyURL, p.proxysi.DirectURL)
+			w.Header().Add(HeaderPrimaryProxyID, p.proxysi.DaemonID)
 			s := fmt.Sprintf("Cannot initiate rebalance from a non-primary proxy %v", p.si.DaemonID)
 			p.invalmsghdlr(w, r, s)
 			return
