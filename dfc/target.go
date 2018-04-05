@@ -109,7 +109,6 @@ func (t *targetrunner) run() error {
 	// fill-in mpaths
 	ctx.mountpaths.available = make(map[string]*mountPath, len(ctx.config.FSpaths))
 	ctx.mountpaths.offline = make(map[string]*mountPath, len(ctx.config.FSpaths))
-	ctx.mountpaths.availOrdered = make([]string, 0, len(ctx.config.FSpaths))
 	if t.testingFSPpaths() {
 		glog.Infof("Warning: configuring %d fspaths for testing", ctx.config.TestFSP.Count)
 		t.testCachepathMounts()
@@ -117,11 +116,7 @@ func (t *targetrunner) run() error {
 		t.fspath2mpath()
 		t.mpath2Fsid() // enforce FS uniqueness
 	}
-
-	// sort mountpaths by name - to keep their order stable for filepath.Walk
-	ctx.mountpaths.Lock()
-	sort.Strings(ctx.mountpaths.availOrdered)
-	ctx.mountpaths.Unlock()
+	ctx.mountpaths.updateOrderedList() // generate sorted list of mountpaths
 
 	for mpath := range ctx.mountpaths.available {
 		cloudbctsfqn := mpath + "/" + ctx.config.CloudBuckets
@@ -2000,7 +1995,6 @@ func (t *targetrunner) fspath2mpath() {
 		_, ok := ctx.mountpaths.available[mp.Path]
 		assert(!ok)
 		ctx.mountpaths.available[mp.Path] = mp
-		ctx.mountpaths.availOrdered = append(ctx.mountpaths.availOrdered, mp.Path)
 	}
 }
 
@@ -2033,7 +2027,6 @@ func (t *targetrunner) testCachepathMounts() {
 		_, ok := ctx.mountpaths.available[mp.Path]
 		assert(!ok)
 		ctx.mountpaths.available[mp.Path] = mp
-		ctx.mountpaths.availOrdered = append(ctx.mountpaths.availOrdered, mp.Path)
 	}
 }
 

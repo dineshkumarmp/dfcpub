@@ -101,14 +101,7 @@ func (k *diskkeeper) checkAlivePaths(err error) {
 			ctx.mountpaths.Lock()
 			delete(ctx.mountpaths.available, mp.Path)
 			ctx.mountpaths.offline[mp.Path] = mp
-			// FIXME TODO: just recreate the list of sorted mountpaths and use it everywhere
-			for i, mpath := range ctx.mountpaths.availOrdered {
-				if mpath == mp.Path {
-					copy(ctx.mountpaths.availOrdered[i:], ctx.mountpaths.availOrdered[i+1:])
-					ctx.mountpaths.availOrdered = ctx.mountpaths.availOrdered[:len(ctx.mountpaths.availOrdered)-1]
-					break
-				}
-			}
+			ctx.mountpaths.updateOrderedList()
 			ctx.mountpaths.Unlock()
 		}
 		k.timestamp(mp.Path)
