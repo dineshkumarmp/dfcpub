@@ -8,6 +8,7 @@ package dfc
 import (
 	"io/ioutil"
 	"os"
+	"path"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -16,7 +17,8 @@ import (
 )
 
 const (
-	fsCheckInterval = time.Second * 10
+	fsCheckInterval     = time.Second * 10
+	tmpFilenameTemplate = "DFC-TEMP-FILE"
 )
 
 type diskkeeper struct {
@@ -152,8 +154,8 @@ func (k *diskkeeper) checkPaths(err error) {
 	}
 }
 
-func (k *diskkeeper) pathTest(path string) (ok bool) {
-	tmpdir, err := ioutil.TempDir(path, "DFC-TMP")
+func (k *diskkeeper) pathTest(mountpath string) (ok bool) {
+	tmpdir, err := ioutil.TempDir(mountpath, "DFC-TMP")
 	if err != nil {
 		glog.Errorf("Failed to create temporary directory: %v", err)
 		return false
@@ -165,9 +167,8 @@ func (k *diskkeeper) pathTest(path string) (ok bool) {
 		}
 	}()
 
-	// FIXME TODO: generate temporary file name to be compatible with
-	// isworkfile() - it must return true for temporary file
-	tmpfile, err := ioutil.TempFile(tmpdir, "DFC-TMP-FILE")
+	tmpfilename := k.t.fqn2workfile(path.Join(tmpdir, tmpFilenameTemplate))
+	tmpfile, err := os.OpenFile(tmpfilename, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		glog.Errorf("Failed to create temporary file: %v", err)
 		return false
