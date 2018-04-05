@@ -2,7 +2,9 @@ package dfc_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -13,10 +15,14 @@ import (
 
 	"github.com/NVIDIA/dfcpub/dfc"
 	"github.com/OneOfOne/xxhash"
+	"golang.org/x/net/context/ctxhttp"
 )
 
 const (
-	HRWmLCG32 = 1103515245
+	HRWmLCG32    = 1103515245
+	pingtimeout  = 100 * time.Millisecond
+	pollinterval = 500 * time.Millisecond
+	maxpings     = 10
 )
 
 var (
@@ -25,13 +31,13 @@ var (
 		Test{"Multiple Failures", multiple_failures},
 		Test{"Rejoin", rejoin},
 	}
-	currentPrimaryProxyID = ""
-	originalProxyURL      string
-	originalProxyPort     string
+	runMultipleProxyTests bool
+	keepaliveseconds      int64
 )
 
 func init() {
-
+	flag.BoolVar(&runMultipleProxyTests, "testmultipleproxies", false, "If present, Multiple Proxy tests will be run")
+	flag.Int64Var(&keepaliveseconds, "keepaliveseconds", 15, "The keepalive poll time for the cluster")
 }
 
 //===================
@@ -43,23 +49,21 @@ func init() {
 func Test_vote(t *testing.T) {
 	parse()
 
+	if !runMultipleProxyTests {
+		t.Skipf("-testmultipleproxies flag unset")
+	}
+
 	smap := getClusterMap(httpclient, t)
 	if len(smap.Pmap) <= 1 {
 		t.Errorf("Not enough proxies to run Test_vote, must be more than 1")
 		return
 	}
 
-	originalProxyURL = proxyurl
-	originalProxyPort = smap.ProxySI.DaemonPort
-
 	for _, test := range voteTests {
 		t.Run(test.name, test.method)
 		if t.Failed() && abortonerr {
 			t.FailNow()
 		}
-
-		// Reset Changed Settings
-		//		restore(httpclient, originalProxyURL, originalProxyPort)
 	}
 }
 
@@ -81,15 +85,13 @@ func proxy_failure(t *testing.T) {
 	}
 
 	// Kill original primary proxy
-	cmd, args, err := kill(httpclient, smap.ProxySI.DirectURL, smap.ProxySI.DaemonPort)
+	primaryProxyURL := smap.ProxySI.DirectURL
+	cmd, args, err := kill(httpclient, primaryProxyURL, smap.ProxySI.DaemonPort)
 	if err != nil {
 		t.Errorf("Error killing Primary Proxy: %v", err)
 	}
-
-	currentPrimaryProxyID = nextProxyID
-
-	// Wait the Keepalive Time (max time it should take to switch)
-	time.Sleep(30 * time.Second) // TODO: Keepalive Time
+	// Wait the maxmimum time it should take to switch.
+	time.Sleep(time.Duration(2*keepaliveseconds) * time.Second)
 
 	// Check if the next proxy is the one we found from hrw
 	proxyurl = nextProxyURL
@@ -98,7 +100,11 @@ func proxy_failure(t *testing.T) {
 		t.Errorf("Incorrect Primary Proxy: %v, should be: %v", smap.ProxySI.DaemonID, nextProxyID)
 	}
 
-	restore(httpclient, originalProxyURL, cmd, args)
+	args = append(args, "-proxyurl="+nextProxyURL)
+	err = restore(httpclient, primaryProxyURL, cmd, args)
+	if err != nil {
+		t.Errorf("Error restoring proxy: %v", err)
+	}
 }
 
 func multiple_failures(t *testing.T) {
@@ -133,10 +139,8 @@ func multiple_failures(t *testing.T) {
 		t.Errorf("Error killing Target: %v", err)
 	}
 
-	currentPrimaryProxyID = nextProxyID
-
-	// Wait the Keepalive Time (max time it should take to switch)
-	time.Sleep(30 * time.Second) // TODO: Keepalive Time
+	// Wait the maxmimum time it should take to switch.
+	time.Sleep(time.Duration(2*keepaliveseconds) * time.Second)
 
 	// Check if the next proxy is the one we found from hrw
 	proxyurl = nextProxyURL
@@ -146,12 +150,19 @@ func multiple_failures(t *testing.T) {
 	}
 
 	// Restore the killed target
-	restore(httpclient, targetURLToKill, tcmd, targs)
-	restore(httpclient, primaryProxyURL, pcmd, pargs)
+	targs = append(targs, "-proxyurl="+nextProxyURL)
+	err = restore(httpclient, targetURLToKill, tcmd, targs)
+	if err != nil {
+		t.Errorf("Error restoring target: %v", err)
+	}
+	pargs = append(pargs, "-proxyurl="+nextProxyURL)
+	err = restore(httpclient, primaryProxyURL, pcmd, pargs)
+	if err != nil {
+		t.Errorf("Error restoring proxy: %v", err)
+	}
 }
 
 func rejoin(t *testing.T) {
-
 	// Get Smap
 	smap := getClusterMap(httpclient, t)
 
@@ -166,11 +177,11 @@ func rejoin(t *testing.T) {
 	primaryProxyURL := smap.ProxySI.DirectURL
 	pcmd, pargs, err := kill(httpclient, primaryProxyURL, smap.ProxySI.DaemonPort)
 	if err != nil {
-		t.Errorf("Error killing Primary Proxy: %v")
+		t.Errorf("Error killing Primary Proxy: %v", err)
 	}
 
-	// Wait the Keepalive Time (max time it should take to switch)
-	time.Sleep(30 * time.Second) // TODO: Keepalive Time
+	// Wait the maxmimum time it should take to switch.
+	time.Sleep(time.Duration(2*keepaliveseconds) * time.Second)
 
 	// Kill a Target
 	targetURLToKill := ""
@@ -185,25 +196,49 @@ func rejoin(t *testing.T) {
 	}
 
 	tcmd, targs, err := kill(httpclient, targetURLToKill, targetPortToKill)
+	time.Sleep(5 * time.Second) // FIXME: Deterministic wait for smap propogation
 
 	proxyurl = nextProxyURL
 	smap = getClusterMap(httpclient, t)
-	if smap.ProxySI.DaemonID != nextProxyID {
+	if smap.ProxySI == nil {
+		t.Errorf("Nil primary proxy")
+	} else if smap.ProxySI.DaemonID != nextProxyID {
 		t.Errorf("Incorrect Primary Proxy: %v, should be: %v", smap.ProxySI.DaemonID, nextProxyID)
 	}
 	if _, ok := smap.Smap[targetIDToKill]; ok {
 		t.Errorf("Killed Target was not removed from the cluster map: %v", targetIDToKill)
 	}
-	// Restart that Target
-	restore(httpclient, targetURLToKill, tcmd, targs)
 
+	// Remove proxyurl CLI Variable
+	var idx int
+	found := false
+	for i, arg := range targs {
+		if strings.Contains(arg, "-proxyurl") {
+			idx = i
+			found = true
+		}
+	}
+	if found {
+		targs = append(targs[:idx], targs[idx+1:]...)
+	}
+
+	// Restart that Target
+	err = restore(httpclient, targetURLToKill, tcmd, targs)
+	if err != nil {
+		t.Errorf("Error restoring target: %v", err)
+	}
+	time.Sleep(5 * time.Second)
 	// See that it successfully rejoins the cluster
 	smap = getClusterMap(httpclient, t)
 	if _, ok := smap.Smap[targetIDToKill]; !ok {
 		t.Errorf("Restarted Target did not rejoin the cluster: %v", targetIDToKill)
 	}
 
-	restore(httpclient, primaryProxyURL, pcmd, pargs)
+	pargs = append(pargs, "-proxyurl="+nextProxyURL)
+	err = restore(httpclient, primaryProxyURL, pcmd, pargs)
+	if err != nil {
+		t.Errorf("Error restoring target: %v", err)
+	}
 }
 
 //=========
@@ -273,49 +308,47 @@ func kill(httpclient *http.Client, url, port string) (cmd string, args []string,
 func restore(httpclient *http.Client, url, cmd string, args []string) error {
 	// Restart it
 	cmdStart := exec.Command(cmd, args...)
+	var stderr bytes.Buffer
+	cmdStart.Stderr = &stderr
 	go func() {
-		cmdStart.Run()
+		err := cmdStart.Run()
+		if err != nil {
+			fmt.Printf("Error running command %v %v: %v (%v)\n", cmd, args, err, stderr.String())
+		}
 	}()
 
-	time.Sleep(5 * time.Second)
-
-	// Send a Election Confirmation message to update the proxy:
-	vr := dfc.VoteRecord{
-		Candidate: currentPrimaryProxyID,
-	}
-	msg := dfc.VoteMessage{Record: vr}
-	jsbytes, err := json.Marshal(&msg)
-	if err != nil {
-		return fmt.Errorf("Unexpected failure to marshal VoteMessage: %v", err)
-	}
-
-	requrl := fmt.Sprintf("%s/%s/%s/%s", url, dfc.Rversion, dfc.Rvote, dfc.Rvoteres)
-	req, err := http.NewRequest(http.MethodPut, requrl, bytes.NewBuffer(jsbytes))
-
-	if err != nil {
-		return fmt.Errorf("Unexpected failure to create http request %s %s, err: %v", http.MethodPut, requrl, err)
-	}
-
-	r, err := httpclient.Do(req)
-	if err != nil {
-		return fmt.Errorf("Error sending HTTP Request: %v", err)
-	}
-	defer func(r *http.Response) {
-		if r.Body != nil {
-			r.Body.Close()
+	pingurl := url + "/" + dfc.Rversion + "/" + dfc.Rhealth
+	// Wait until the proxy is back up
+	var i int
+	for i = 0; i < maxpings; i++ {
+		if ping(httpclient, pingurl) {
+			break
 		}
-	}(r)
-	_, err = ioutil.ReadAll(r.Body)
-	if err != nil {
-		return fmt.Errorf("Error reading HTTP Body: %v", err)
+		time.Sleep(pollinterval)
+	}
+	if i == maxpings {
+		return fmt.Errorf("Failed to restore: client did not respond to any of %v pings", maxpings)
 	}
 
+	time.Sleep(1 * time.Second) // Add time for the smap to propogate
 	return nil
 }
 
+func ping(httpclient *http.Client, url string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), pingtimeout)
+	defer cancel()
+	r, err := ctxhttp.Get(ctx, httpclient, url)
+	if err == nil {
+		ioutil.ReadAll(r.Body)
+		r.Body.Close()
+	}
+
+	return err == nil
+}
+
 func getProcessOnPort(port string) (command string, args []string, err error) {
-	syscallLSOF := "sudo"
-	argsLSOF := []string{"lsof", "-sTCP:LISTEN", "-i", ":8080"}
+	syscallLSOF := "lsof"
+	argsLSOF := []string{"-sTCP:LISTEN", "-i", ":" + port}
 	commandLSOF := exec.Command(syscallLSOF, argsLSOF...)
 	output, err := commandLSOF.CombinedOutput()
 	if err != nil {

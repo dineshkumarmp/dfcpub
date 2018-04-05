@@ -283,15 +283,14 @@ func (p *proxyrunner) ElectAmongProxies(vr VoteRecord) (winner bool, err error) 
 	wg.Wait()
 	close(resch)
 	close(errch)
-	select {
-	case err = <-errch:
+	y, n := 0, 0
+	for err := range errch {
 		if err != nil {
-			return false, err
+			glog.Warningf("Error response from target: %v", err)
+			n++
 		}
-	default:
 	}
 
-	y, n := 0, 0
 	for res := range resch {
 		if res {
 			y++
@@ -308,12 +307,12 @@ func (p *proxyrunner) ElectAmongProxies(vr VoteRecord) (winner bool, err error) 
 func (p *proxyrunner) ConfirmElectionVictory(vr VoteRecord) error {
 	wg := &sync.WaitGroup{}
 	errch := p.BroadcastElectionVictory(vr, wg)
-	defer close(errch)
 	wg.Wait()
-	select {
-	case err := <-errch:
-		return err
-	default:
+	close(errch)
+	for err := range errch {
+		if err != nil {
+			glog.Warningf("Error broadcasting election victory: %v", err)
+		}
 	}
 	return nil
 }

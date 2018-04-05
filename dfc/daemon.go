@@ -39,6 +39,7 @@ type cliVars struct {
 	loglevel  string
 	statstime time.Duration
 	ntargets  int
+	proxyurl  string
 }
 
 // FIXME: consider sync.Map; NOTE: atomic version is used by readers
@@ -301,6 +302,7 @@ func dfcinit() {
 	flag.StringVar(&clivars.loglevel, "loglevel", "", "glog loglevel")
 	flag.DurationVar(&clivars.statstime, "statstime", 0, "http and capacity utilization statistics log interval")
 	flag.IntVar(&clivars.ntargets, "ntargets", 0, "number of storage targets to expect at startup (hint, proxy-only)")
+	flag.StringVar(&clivars.proxyurl, "proxyurl", "", "Override config Proxy settings")
 
 	flag.Parse()
 	if clivars.conffile == "" {

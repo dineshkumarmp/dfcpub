@@ -107,6 +107,13 @@ func (h *httprunner) registerhdlr(path string, handler func(http.ResponseWriter,
 }
 
 func (h *httprunner) init(s statsif) {
+	// clivars proxyurl overrides config proxy settings.
+	// If it is set, the proxy will not register as the primary proxy.
+	if clivars.proxyurl != "" {
+		ctx.config.Proxy.ID = ""
+		ctx.config.Proxy.URL = clivars.proxyurl
+	}
+
 	h.statsif = s
 	ipaddr, errstr := getipv4addr()
 	if errstr != "" {
