@@ -949,9 +949,13 @@ func (p *proxyrunner) httpdaeput(w http.ResponseWriter, r *http.Request) {
 		}
 	case ActShutdown:
 		q := r.URL.Query()
-		abort := q.Get(URLParamForce)
-		_ = abort
-		// FIXME: Query param
+		forcestr := q.Get(URLParamForce)
+		force := (forcestr == "true")
+		if p.primary && !force {
+			s := fmt.Sprintf("Cannot shutdown Primary Proxt without %s=true query parameter", URLParamForce)
+			p.invalmsghdlr(w, r, s)
+			return
+		}
 		_ = syscall.Kill(syscall.Getpid(), syscall.SIGINT)
 	default:
 		s := fmt.Sprintf("Unexpected ActionMsg <- JSON [%v]", msg)
