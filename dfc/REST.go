@@ -57,6 +57,7 @@ const (
 	URLParamAutoReb          = "auto_reb"   // true: auto-rebalance upon Smap version change, false: RESTful
 	URLParamSuspectedTarget  = "suspect"    // suspect=string - id of target suspected of failure
 	URLParamPrimaryCandidate = "candidate"  // candidate=string - id of candidate for Primary Proxy
+	URLParamForce            = "force"      // force=bool - Kill without unregistering.
 )
 
 // TODO: sort and some props are TBD

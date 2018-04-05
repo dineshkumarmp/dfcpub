@@ -32,7 +32,6 @@ const (
 //==========
 //
 // Messages
-// FIXME: Move to REST.go when finalized
 //
 //==========
 
@@ -83,6 +82,7 @@ func (p *proxyrunner) votehdlr(w http.ResponseWriter, r *http.Request) {
 		p.httpproxyvote(w, r)
 	case http.MethodPut:
 		if apitems[0] == Rvoteres {
+			p.primary = false
 			p.httpsetprimaryproxy(w, r)
 			return
 		} else if apitems[0] == Rvoteinit {
@@ -235,7 +235,7 @@ func (p *proxyrunner) ProxyElection(vr VoteRecord) error {
 	// Begin Election State
 	elected, err := p.ElectAmongProxies(vr)
 	if err != nil {
-		return fmt.Errorf("Error requesting Election from other proxies: %v", err)
+		return fmt.Errorf("Error requesting Election from other proxies/targets: %v", err)
 	}
 	if !elected {
 		// Move back to Idle state
@@ -250,7 +250,7 @@ func (p *proxyrunner) ProxyElection(vr VoteRecord) error {
 	if err != nil {
 		// Return to Idle state
 		// FIXME: Ignore error, become new primary?
-		return fmt.Errorf("Error confirming election victory with other proxies: %v", err)
+		return fmt.Errorf("Error confirming election victory with other proxies/targets: %v", err)
 	}
 
 	glog.Infoln("Moving to Primary state")
@@ -403,7 +403,7 @@ func (p *proxyrunner) SendNewPrimaryProxy(vr VoteRecord, di *daemonInfo, wg *syn
 	url := fmt.Sprintf("%s/%s/%s/%s", di.DirectURL, Rversion, Rvote, Rvoteres)
 	req, err := http.NewRequest(http.MethodPut, url, bytes.NewBuffer(jsbytes))
 	if err != nil {
-		e := fmt.Errorf("Unexpected failure to create http request %s %s, err: %v", http.MethodGet, url, err)
+		e := fmt.Errorf("Unexpected failure to create http request %s %s, err: %v", http.MethodPut, url, err)
 		errch <- e
 		return
 	}
@@ -537,9 +537,6 @@ func (h *httprunner) VoteOnProxy(candidate string) (bool, error) {
 		// KeepAliveTime/2 is the expected amount time since the last keepalive was sent
 		return false, nil
 	}
-
-	//FIXME: Currently, the above timestamp only applies to outgoing communications.
-	// It should also update the timestamp when recieving communication from the proxy.
 
 	// Second: Vote according to whether or not the candidate is the Highest Random Weight remaining
 	// in the Smap

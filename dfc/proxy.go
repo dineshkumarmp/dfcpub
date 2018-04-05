@@ -926,7 +926,7 @@ func (p *proxyrunner) httpdaeput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if apitems[0] == Rsyncsmap || apitems[0] == Rebalance {
+	if len(apitems) > 0 && (apitems[0] == Rsyncsmap || apitems[0] == Rebalance) {
 		p.httpdaeputSmap(w, r, apitems)
 		return
 	}
@@ -947,6 +947,12 @@ func (p *proxyrunner) httpdaeput(w http.ResponseWriter, r *http.Request) {
 		} else if errstr := p.setconfig(msg.Name, value); errstr != "" {
 			p.invalmsghdlr(w, r, errstr)
 		}
+	case ActShutdown:
+		q := r.URL.Query()
+		abort := q.Get(URLParamForce)
+		_ = abort
+		// FIXME: Query param
+		_ = syscall.Kill(syscall.Getpid(), syscall.SIGINT)
 	default:
 		s := fmt.Sprintf("Unexpected ActionMsg <- JSON [%v]", msg)
 		p.invalmsghdlr(w, r, s)
