@@ -9,7 +9,6 @@ import (
 	"io/ioutil"
 	"os"
 	"path"
-	"sort"
 	"sync/atomic"
 	"time"
 
@@ -56,9 +55,8 @@ func (k *diskkeeper) skipCheck(sid string) bool {
 	last, ok := k.okmap.okmap[sid]
 	k.okmap.Unlock()
 
-	_, avail := ctx.mountpaths.available[sid]
 	interval := ctx.config.DiskKeeper.FSCheckTime
-	if !avail {
+	if _, avail := ctx.mountpaths.available[sid]; !avail {
 		interval = ctx.config.DiskKeeper.OfflineFSCheckTime
 	}
 
@@ -118,12 +116,11 @@ func (k *diskkeeper) checkOfflinePaths(err error) {
 
 		ok := k.pathTest(mp.Path)
 		if ok {
-			glog.Errorf("Mountpath %s is back. Enabling it...", mp.Path)
+			glog.Infof("Mountpath %s is back. Enabling it...", mp.Path)
 			ctx.mountpaths.Lock()
 			delete(ctx.mountpaths.offline, mp.Path)
 			ctx.mountpaths.available[mp.Path] = mp
-			ctx.mountpaths.availOrdered = append(ctx.mountpaths.availOrdered, mp.Path)
-			sort.Strings(ctx.mountpaths.availOrdered)
+			ctx.mountpaths.updateOrderedList()
 			ctx.mountpaths.Unlock()
 		}
 		k.timestamp(mp.Path)
