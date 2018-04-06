@@ -203,11 +203,11 @@ func ListBucket(proxyurl, bucket string, msg *dfc.GetMsg) (*dfc.BucketList, erro
 	var (
 		url     = proxyurl + "/v1/files/" + bucket
 		request *http.Request
-		r       *http.Response
 	)
 
 	reslist := &dfc.BucketList{Entries: make([]*dfc.BucketEntry, 0, 1000)}
 	for {
+		var r *http.Response
 		injson, err := json.Marshal(msg)
 		if err != nil {
 			return nil, err
